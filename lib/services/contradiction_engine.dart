@@ -1,119 +1,198 @@
-import 'news_service.dart';
-
-class ContradictionEngineResult {
-  final List<String> contradictions;
-  final double confidenceScore;
-  final List<String> trustedSources;
-
-  ContradictionEngineResult({
-    required this.contradictions,
-    required this.confidenceScore,
-    required this.trustedSources,
-  });
-
-  Map<String, dynamic> toJson() {
-    return {
-      'contradictions': contradictions,
-      'confidence_score': confidenceScore,
-      'trusted_sources': trustedSources,
-    };
-  }
-}
+// lib/services/contradiction_engine.dart
 
 class ContradictionEngine {
-  static ContradictionEngineResult detect({
-    required List<NewsArticle> newsArticles,
-    required Map<String, dynamic> warehouse,
-    required Map<String, dynamic> sales,
-    required Map<String, dynamic> supplier,
-    required Map<String, dynamic> complaints,
+  /// Detects contradictions and calculates confidence scores city-by-city
+  static Map<String, dynamic> detect({
+    required Map<String, dynamic>? warehouseResult,
+    required Map<String, dynamic>? salesResult,
+    required dynamic supplierResult,
+    required Map<String, dynamic>? complaintsResult,
+    required List<dynamic>? newsResult,
+    required List<String> cities,
   }) {
-    List<String> contradictions = [];
+    List<Map<String, dynamic>> contradictions = [];
+    Map<String, double> cityConfidence = {};
     List<String> trustedSources = [];
-    List<double> trustedScores = [];
 
-    // Base credibility definitions
-    const double newsScore = 0.90;
-    const double complaintsScore = 0.85;
-    const double salesScore = 0.75;
-    const double supplierScore = 0.72;
-    const double warehouseBaseScore = 0.70; // if fresh
+    // 1. Establish source presence
+    bool hasWarehouse = warehouseResult != null;
+    bool hasSales = salesResult != null;
+    bool hasSupplier = supplierResult != null;
+    bool hasComplaints = complaintsResult != null;
+    bool hasNews = newsResult != null && newsResult.isNotEmpty;
 
-    // Evaluate warehouse freshness
-    bool warehouseStale = warehouse['staleness_flag'] == 'STALE';
-    double currentWarehouseScore = warehouseStale ? 0.30 : warehouseBaseScore;
+    // Determine staleness of warehouse
+    bool isWarehouseStale = false;
+    if (hasWarehouse) {
+      isWarehouseStale = warehouseResult['staleness_flag'] == true;
+    }
 
-    // Check sources status
-    trustedSources.add('NewsAPI Live Feed');
-    trustedScores.add(newsScore);
+    // 2. Assign dynamic credibility weights per source
+    double wWarehouse = hasWarehouse ? (isWarehouseStale ? 0.4 : 0.85) : 0.0;
+    double wSales = hasSales ? 0.90 : 0.0;
+    double wSupplier = hasSupplier ? 0.75 : 0.0;
+    double wComplaints = hasComplaints ? 0.80 : 0.0;
+    double wNews = hasNews ? 0.65 : 0.0;
 
-    trustedSources.add('Complaints CSV (<24h)');
-    trustedScores.add(complaintsScore);
+    // Identify trusted sources (credibility weight >= 0.7)
+    if (hasSales) trustedSources.add('sales.csv');
+    if (hasWarehouse && !isWarehouseStale) trustedSources.add('warehouse.csv');
+    if (hasComplaints) trustedSources.add('complaints.csv');
+    if (hasSupplier) trustedSources.add('supplier.json');
 
-    trustedSources.add('Sales CSV (<24h)');
-    trustedScores.add(salesScore);
+    // 3. Perform city-by-city validation
+    for (String city in cities) {
+      double cityBaseConfidence = 100.0;
+      List<String> activeSourcesInCity = [];
+      
+      // Extract data for the specific city
+      final warehouseList = hasWarehouse && warehouseResult['city_data'] != null
+          ? (warehouseResult['city_data'][city] as List<dynamic>?) ?? []
+          : [];
+      final salesList = hasSales && salesResult['city_data'] != null
+          ? (salesResult['city_data'][city] as List<dynamic>?) ?? []
+          : [];
+      final complaintsList = hasComplaints && complaintsResult['city_data'] != null
+          ? (complaintsResult['city_data'][city] as List<dynamic>?) ?? []
+          : [];
 
-    trustedSources.add('Supplier JSON (<24h)');
-    trustedScores.add(supplierScore);
+      double totalWeight = 0.0;
+      int activeSourceCount = 0;
 
-    if (warehouseStale) {
-      // Overridden due to staleness
-      // Do not add to trusted list as primary source, mark overridden
+      if (warehouseList.isNotEmpty) {
+        activeSourcesInCity.add('Warehouse');
+        totalWeight += wWarehouse;
+        activeSourceCount++;
+      }
+      if (salesList.isNotEmpty) {
+        activeSourcesInCity.add('Sales');
+        totalWeight += wSales;
+        activeSourceCount++;
+      }
+      if (complaintsList.isNotEmpty) {
+        activeSourcesInCity.add('Complaints');
+        totalWeight += wComplaints;
+        activeSourceCount++;
+      }
+      if (hasSupplier) {
+        totalWeight += wSupplier;
+        activeSourceCount++;
+      }
+      if (hasNews) {
+        totalWeight += wNews;
+        activeSourceCount++;
+      }
+
+      double avgWeight = activeSourceCount > 0 ? (totalWeight / activeSourceCount) : 1.0;
+      cityBaseConfidence = cityBaseConfidence * avgWeight;
+
+      // Deduct from confidence if warehouse data is stale
+      if (warehouseList.isNotEmpty && isWarehouseStale) {
+        cityBaseConfidence -= 15.0;
+        contradictions.add({
+          'city': city,
+          'type': 'Stale Data Warning',
+          'description': 'Warehouse data for $city is older than 30 days. Stock figures may not reflect current physical status.',
+          'severity': 'MEDIUM',
+          'sources': ['warehouse.csv'],
+        });
+      }
+
+      // Check Contradiction A: High warehouse stock vs customer stockout complaints
+      if (warehouseList.isNotEmpty && complaintsList.isNotEmpty) {
+        // Calculate total stock reported in warehouse for this city
+        double totalStock = 0;
+        for (var row in warehouseList) {
+          final stockVal = row['stock'] ?? row['quantity'] ?? row['inventory'] ?? 0;
+          totalStock += double.tryParse(stockVal.toString()) ?? 0;
+        }
+
+        // Count stockout-related complaints
+        int stockoutComplaintsCount = 0;
+        for (var row in complaintsList) {
+          final text = (row['complaint'] ?? row['text'] ?? row['description'] ?? '').toString().toLowerCase();
+          if (text.contains('stockout') ||
+              text.contains('out of stock') ||
+              text.contains('no stock') ||
+              text.contains('empty shelf') ||
+              text.contains('unavailable')) {
+            stockoutComplaintsCount++;
+          }
+        }
+
+        if (totalStock > 100 && stockoutComplaintsCount > 0) {
+          double deduction = 15.0 + (stockoutComplaintsCount * 5.0);
+          if (deduction > 40.0) deduction = 40.0;
+          cityBaseConfidence -= deduction;
+
+          contradictions.add({
+            'city': city,
+            'type': 'Stock Inconsistency',
+            'description': 'Warehouse reports healthy stock level ($totalStock units) in $city, but $stockoutComplaintsCount customer complaints report items are out of stock.',
+            'severity': 'HIGH',
+            'sources': ['warehouse.csv', 'complaints.csv'],
+          });
+        }
+      }
+
+      // Check Contradiction B: High sales volume reported but zero stock in warehouse
+      if (warehouseList.isNotEmpty && salesList.isNotEmpty) {
+        double totalStock = 0;
+        for (var row in warehouseList) {
+          final stockVal = row['stock'] ?? row['quantity'] ?? row['inventory'] ?? 0;
+          totalStock += double.tryParse(stockVal.toString()) ?? 0;
+        }
+
+        double totalSales = 0;
+        for (var row in salesList) {
+          final salesVal = row['sales'] ?? row['units_sold'] ?? row['quantity'] ?? 0;
+          totalSales += double.tryParse(salesVal.toString()) ?? 0;
+        }
+
+        if (totalSales > 10 && totalStock == 0) {
+          cityBaseConfidence -= 20.0;
+          contradictions.add({
+            'city': city,
+            'type': 'Sales-Stock Mismatch',
+            'description': 'Sales data shows sales of $totalSales units in $city, but warehouse reports 0 units in stock.',
+            'severity': 'HIGH',
+            'sources': ['warehouse.csv', 'sales.csv'],
+          });
+        }
+      }
+
+      // Keep confidence in valid 0-100 range
+      if (cityBaseConfidence < 0.0) cityBaseConfidence = 0.0;
+      if (cityBaseConfidence > 100.0) cityBaseConfidence = 100.0;
+
+      // If no sources present for city, or only 1 source, it has less verification, but we keep its confidence
+      if (activeSourcesInCity.isEmpty) {
+        cityConfidence[city] = 0.0;
+      } else {
+        cityConfidence[city] = double.parse(cityBaseConfidence.toStringAsFixed(1));
+      }
+    }
+
+    // 4. Compute overall confidence score (average of cities)
+    double overallConfidence = 0.0;
+    if (cityConfidence.isNotEmpty) {
+      double sum = 0.0;
+      int count = 0;
+      cityConfidence.forEach((city, score) {
+        sum += score;
+        count++;
+      });
+      overallConfidence = sum / count;
     } else {
-      trustedSources.add('Warehouse CSV (Fresh)');
-      trustedScores.add(currentWarehouseScore);
+      // Default to 100 if no cities, or 80 if files exist but no city column
+      overallConfidence = 80.0;
     }
 
-    // 1. Check Contradiction: Stale Warehouse OK vs. Active News/Supply Chain Strike/Complaints Spike
-    bool hasMotorwayStrike = newsArticles.any((article) =>
-        article.title.toLowerCase().contains('strike') ||
-        article.description.toLowerCase().contains('strike') ||
-        article.title.toLowerCase().contains('disrupt') ||
-        article.description.toLowerCase().contains('disrupt'));
-
-    int stockUnits = warehouse['units'] ?? 0;
-    if (warehouseStale && stockUnits > 100) {
-      if (hasMotorwayStrike) {
-        contradictions.add(
-          "Warehouse reports ample stock ($stockUnits units) but data is STALE (3+ days old, Credibility: 0.30). News reports active M-9 motorway transport strike (Credibility: 0.90). Stale stock overridden by live transport blockade signal.",
-        );
-      }
-      if ((complaints['count'] ?? 0) > 20) {
-        contradictions.add(
-          "Warehouse reports $stockUnits units available (Credibility: 0.30), but customer complaints have spiked to ${complaints['count']} (Credibility: 0.85). Stale warehouse stock records overridden by verified customer stockout reports.",
-        );
-      }
-    }
-
-    // 2. Check Contradiction: Supplier Delay Alert vs. Supplier Reliability Score
-    bool delayAlert = supplier['delay_flag'] == true;
-    int reliability = supplier['reliability_score'] ?? 100;
-    if (delayAlert && reliability > 80) {
-      contradictions.add(
-        "Supplier '${supplier['supplier_name']}' has high reliability ($reliability, Credibility: 0.72) but has issued an active delay alert. Alert takes precedence, showing risk of short-term delivery failure.",
-      );
-    }
-
-    // 3. Check Contradiction: Sales Spike vs. Stale Stock
-    double demandSpike = sales['demand_spike_percent'] ?? 0.0;
-    if (demandSpike > 100.0 && warehouseStale) {
-      contradictions.add(
-        "Sales report a +${demandSpike.toStringAsFixed(0)}% demand spike (Credibility: 0.75), while warehouse database has not updated for >48 hours. Sales velocity suggests stock depleted, overriding stale warehouse counts.",
-      );
-    }
-
-    // Calculate confidence score as the weighted average of the trusted source scores
-    double totalScore = trustedScores.reduce((a, b) => a + b);
-    double confidenceScore = totalScore / trustedScores.length;
-
-    // Cap confidence score representation
-    if (confidenceScore > 1.0) confidenceScore = 1.0;
-    if (confidenceScore < 0.0) confidenceScore = 0.0;
-
-    return ContradictionEngineResult(
-      contradictions: contradictions,
-      confidenceScore: confidenceScore,
-      trustedSources: trustedSources,
-    );
+    return {
+      'contradictions': contradictions,
+      'confidence_score': double.parse(overallConfidence.toStringAsFixed(1)),
+      'trusted_sources': trustedSources,
+      'city_confidence': cityConfidence,
+    };
   }
 }

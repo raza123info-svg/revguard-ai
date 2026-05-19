@@ -1,303 +1,238 @@
+// lib/services/file_parser.dart
+
 import 'dart:convert';
 import 'package:csv/csv.dart';
 
 class FileParser {
-  // Helper to parse double or int from dynamic cell
-  static double _parseDouble(dynamic value, {double defaultValue = 0.0}) {
-    if (value == null) return defaultValue;
-    if (value is num) return value.toDouble();
-    final parsed = double.tryParse(value.toString().replaceAll(RegExp(r'[^0-9.-]'), ''));
-    return parsed ?? defaultValue;
+  /// Detects city column index. Returns -1 if not found.
+  static int _detectCityColumn(List<dynamic> headers) {
+    for (int i = 0; i < headers.length; i++) {
+      final name = headers[i].toString().toLowerCase().trim();
+      if (name == 'city' ||
+          name == 'location' ||
+          name == 'town' ||
+          name == 'district' ||
+          name == 'region' ||
+          name == 'source_city' ||
+          name == 'destination_city') {
+        return i;
+      }
+    }
+    return -1;
   }
 
-  static int _parseInt(dynamic value, {int defaultValue = 0}) {
-    if (value == null) return defaultValue;
-    if (value is num) return value.toInt();
-    final parsed = int.tryParse(value.toString().replaceAll(RegExp(r'[^0-9-]'), ''));
-    return parsed ?? defaultValue;
+  /// Detects date column index. Returns -1 if not found.
+  static int _detectDateColumn(List<dynamic> headers) {
+    for (int i = 0; i < headers.length; i++) {
+      final name = headers[i].toString().toLowerCase().trim();
+      if (name.contains('date') ||
+          name.contains('time') ||
+          name.contains('timestamp') ||
+          name.contains('updated') ||
+          name.contains('created')) {
+        return i;
+      }
+    }
+    return -1;
   }
 
-  static DateTime? _parseDate(dynamic value) {
-    if (value == null) return null;
+  /// Parses date string and compares with target date (2026-05-19) to check for staleness (> 30 days)
+  static bool _checkStaleness(List<List<dynamic>> rows, int dateColIdx) {
+    if (dateColIdx == -1 || rows.isEmpty) return false;
+    
+    DateTime targetDate = DateTime(2026, 5, 19);
+    DateTime? latestDate;
+
+    for (var row in rows) {
+      if (row.length > dateColIdx) {
+        final val = row[dateColIdx].toString().trim();
+        final dt = _parseDateString(val);
+        if (dt != null) {
+          if (latestDate == null || dt.isAfter(latestDate)) {
+            latestDate = dt;
+          }
+        }
+      }
+    }
+
+    if (latestDate == null) return false;
+    final diffDays = targetDate.difference(latestDate).inDays;
+    return diffDays > 30; // Stale if more than 30 days old
+  }
+
+  static DateTime? _parseDateString(String val) {
     try {
-      return DateTime.parse(value.toString().trim());
-    } catch (_) {
-      // Try parsing other common formats if needed, or return null
+      // Try standard Iso8601
+      return DateTime.parse(val);
+    } catch (_) {}
+
+    // Try other formats manually
+    // e.g. dd/MM/yyyy or MM/dd/yyyy
+    final parts = val.split(RegExp(r'[-/.]'));
+    if (parts.length == 3) {
+      int? p1 = int.tryParse(parts[0]);
+      int? p2 = int.tryParse(parts[1]);
+      int? p3 = int.tryParse(parts[2]);
+      if (p1 != null && p2 != null && p3 != null) {
+        // If p3 is 4 digits, assume yyyy
+        if (p3 > 1000) {
+          // Check if p1 or p2 is month
+          // Let's assume day/month/year by default, or try year/month/day
+          if (p2 <= 12) {
+            return DateTime(p3, p2, p1);
+          } else if (p1 <= 12) {
+            return DateTime(p3, p1, p2);
+          }
+        } else if (p1 > 1000) {
+          // yyyy/MM/dd
+          if (p2 <= 12) {
+            return DateTime(p1, p2, p3);
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Parse warehouse.csv
+  /// Returns Map with keys:
+  /// - 'city_data': Map<String, List<Map<String, dynamic>>>
+  /// - 'staleness_flag': bool
+  /// - 'headers': List<String>
+  static Map<String, dynamic>? parseWarehouse(String csvContent, String? selectedCity) {
+    if (csvContent.trim().isEmpty) return null;
+    try {
+      final csvData = const CsvToListConverter().convert(csvContent);
+      if (csvData.isEmpty) return null;
+
+      final headers = csvData.first.map((e) => e.toString().trim()).toList();
+      final rows = csvData.sublist(1);
+
+      final cityColIdx = _detectCityColumn(headers);
+      final dateColIdx = _detectDateColumn(headers);
+
+      final staleness = _checkStaleness(rows, dateColIdx);
+
+      final cityData = <String, List<Map<String, dynamic>>>{};
+
+      for (var row in rows) {
+        if (row.length < headers.length) continue;
+        final city = (cityColIdx != -1 && row.length > cityColIdx)
+            ? row[cityColIdx].toString().trim()
+            : (selectedCity ?? 'Karachi');
+        if (city.isEmpty) continue;
+
+        final rowMap = <String, dynamic>{};
+        for (int i = 0; i < headers.length; i++) {
+          rowMap[headers[i]] = row[i];
+        }
+
+        cityData.putIfAbsent(city, () => []).add(rowMap);
+      }
+
+      return {
+        'city_data': cityData,
+        'staleness_flag': staleness,
+        'headers': headers,
+      };
+    } catch (e) {
+      // Log or handle error, fallback to empty or null
       return null;
     }
   }
 
-  /// Tool 2: warehouse.csv parser
-  /// Columns: units_available, Last_Updated, location
-  /// If Last_Updated > 48 hours ago -> staleness_flag = STALE
-  /// Failure (missing column) -> skip staleness check, treat as FRESH
-  static Map<String, dynamic> parseWarehouse(String csvContent) {
+  /// Parse sales.csv
+  /// Returns Map with keys:
+  /// - 'city_data': Map<String, List<Map<String, dynamic>>>
+  /// - 'headers': List<String>
+  static Map<String, dynamic>? parseSales(String csvContent, String? selectedCity) {
+    if (csvContent.trim().isEmpty) return null;
     try {
-      final List<List<dynamic>> rows = csv.decode(csvContent);
-      if (rows.isEmpty) {
-        return {
-          'units': 500,
-          'last_updated': 'N/A',
-          'staleness_flag': 'FRESH',
-          'location': 'Unknown Store'
-        };
-      }
+      final csvData = const CsvToListConverter().convert(csvContent);
+      if (csvData.isEmpty) return null;
 
-      // Extract header row
-      final headers = rows.first.map((e) => e.toString().trim().toLowerCase()).toList();
+      final headers = csvData.first.map((e) => e.toString().trim()).toList();
+      final rows = csvData.sublist(1);
 
-      int unitsIndex = headers.indexOf('units_available');
-      int lastUpdatedIndex = headers.indexOf('last_updated');
-      int locationIndex = headers.indexOf('location');
+      final cityColIdx = _detectCityColumn(headers);
 
-      if (unitsIndex == -1) {
-        // Let's look for fuzzy matching if exact fails
-        unitsIndex = headers.indexWhere((h) => h.contains('unit') || h.contains('stock') || h.contains('avail'));
-      }
-      if (lastUpdatedIndex == -1) {
-        lastUpdatedIndex = headers.indexWhere((h) => h.contains('update') || h.contains('date') || h.contains('time'));
-      }
-      if (locationIndex == -1) {
-        locationIndex = headers.indexWhere((h) => h.contains('loc') || h.contains('store') || h.contains('city'));
-      }
+      final cityData = <String, List<Map<String, dynamic>>>{};
 
-      // If we don't have data rows, return fallback
-      if (rows.length < 2) {
-        return {
-          'units': 500,
-          'last_updated': 'N/A',
-          'staleness_flag': 'FRESH',
-          'location': 'Unknown Store'
-        };
-      }
+      for (var row in rows) {
+        if (row.length < headers.length) continue;
+        final city = (cityColIdx != -1 && row.length > cityColIdx)
+            ? row[cityColIdx].toString().trim()
+            : (selectedCity ?? 'Karachi');
+        if (city.isEmpty) continue;
 
-      // Parse first data row (or latest row)
-      final dataRow = rows[1];
-      int units = unitsIndex != -1 && unitsIndex < dataRow.length
-          ? _parseInt(dataRow[unitsIndex], defaultValue: 500)
-          : 500;
-
-      String location = locationIndex != -1 && locationIndex < dataRow.length
-          ? dataRow[locationIndex].toString().trim()
-          : 'Karachi Store';
-
-      String lastUpdatedStr = 'N/A';
-      String stalenessFlag = 'FRESH';
-
-      // Failure 2 recovery: If Last_Updated is missing, skip staleness check, treat as FRESH
-      if (lastUpdatedIndex != -1 && lastUpdatedIndex < dataRow.length) {
-        final dateVal = dataRow[lastUpdatedIndex];
-        lastUpdatedStr = dateVal.toString().trim();
-        final parsedDate = _parseDate(dateVal);
-        if (parsedDate != null) {
-          final difference = DateTime.now().difference(parsedDate);
-          if (difference.inHours > 48) {
-            stalenessFlag = 'STALE';
-          }
+        final rowMap = <String, dynamic>{};
+        for (int i = 0; i < headers.length; i++) {
+          rowMap[headers[i]] = row[i];
         }
+
+        cityData.putIfAbsent(city, () => []).add(rowMap);
       }
 
       return {
-        'units': units,
-        'last_updated': lastUpdatedStr,
-        'staleness_flag': stalenessFlag,
-        'location': location
+        'city_data': cityData,
+        'headers': headers,
       };
-    } catch (_) {
-      // Fallback
-      return {
-        'units': 500,
-        'last_updated': 'N/A',
-        'staleness_flag': 'FRESH',
-        'location': 'Karachi Store'
-      };
+    } catch (e) {
+      return null;
     }
   }
 
-  /// Tool 3: sales.csv parser
-  /// Columns: date, demand_units, Demand_Trend
-  /// Detect spike: if current > baseline * 2 -> CRITICAL
-  static Map<String, dynamic> parseSales(String csvContent) {
+  /// Parse complaints.csv
+  /// Returns Map with keys:
+  /// - 'city_data': Map<String, List<Map<String, dynamic>>>
+  /// - 'headers': List<String>
+  static Map<String, dynamic>? parseComplaints(String csvContent, String? selectedCity) {
+    if (csvContent.trim().isEmpty) return null;
     try {
-      final List<List<dynamic>> rows = csv.decode(csvContent);
-      if (rows.isEmpty || rows.length < 2) {
-        return {
-          'demand_spike_percent': 0.0,
-          'trend_status': 'NORMAL'
-        };
-      }
+      final csvData = const CsvToListConverter().convert(csvContent);
+      if (csvData.isEmpty) return null;
 
-      final headers = rows.first.map((e) => e.toString().trim().toLowerCase()).toList();
-      int demandIndex = headers.indexOf('demand_units');
-      int trendIndex = headers.indexOf('demand_trend');
+      final headers = csvData.first.map((e) => e.toString().trim()).toList();
+      final rows = csvData.sublist(1);
 
-      if (demandIndex == -1) {
-        demandIndex = headers.indexWhere((h) => h.contains('demand') || h.contains('sale') || h.contains('qty'));
-      }
-      if (trendIndex == -1) {
-        trendIndex = headers.indexWhere((h) => h.contains('trend') || h.contains('status'));
-      }
+      final cityColIdx = _detectCityColumn(headers);
 
-      // Calculate baseline and current demand
-      // We will treat the last row as "current", and the average of all previous rows as the "baseline"
-      int dataRowsCount = rows.length - 1;
-      if (dataRowsCount == 0 || demandIndex == -1) {
-        return {
-          'demand_spike_percent': 0.0,
-          'trend_status': 'NORMAL'
-        };
-      }
+      final cityData = <String, List<Map<String, dynamic>>>{};
 
-      List<double> demands = [];
-      for (int i = 1; i < rows.length; i++) {
-        if (demandIndex < rows[i].length) {
-          demands.add(_parseDouble(rows[i][demandIndex]));
+      for (var row in rows) {
+        if (row.length < headers.length) continue;
+        final city = (cityColIdx != -1 && row.length > cityColIdx)
+            ? row[cityColIdx].toString().trim()
+            : (selectedCity ?? 'Karachi');
+        if (city.isEmpty) continue;
+
+        final rowMap = <String, dynamic>{};
+        for (int i = 0; i < headers.length; i++) {
+          rowMap[headers[i]] = row[i];
         }
-      }
 
-      if (demands.isEmpty) {
-        return {
-          'demand_spike_percent': 0.0,
-          'trend_status': 'NORMAL'
-        };
-      }
-
-      double currentDemand = demands.last;
-      double baseline = 0.0;
-      if (demands.length > 1) {
-        // baseline is average of previous rows
-        double sum = demands.sublist(0, demands.length - 1).reduce((a, b) => a + b);
-        baseline = sum / (demands.length - 1);
-      } else {
-        // Only one data row, baseline is itself
-        baseline = currentDemand;
-      }
-
-      if (baseline == 0.0) baseline = 1.0; // Avoid division by zero
-
-      double spikePercent = ((currentDemand - baseline) / baseline) * 100.0;
-      if (spikePercent < 0) spikePercent = 0.0;
-
-      String trendStatus = 'NORMAL';
-      if (currentDemand > baseline * 2.0) {
-        trendStatus = 'CRITICAL';
-      } else if (spikePercent > 30.0) {
-        trendStatus = 'HIGH';
-      }
-
-      // If Demand_Trend column exists in the last row, we can also factor it in
-      if (trendIndex != -1 && trendIndex < rows.last.length) {
-        final fileTrend = rows.last[trendIndex].toString().toUpperCase().trim();
-        if (fileTrend == 'CRITICAL' || fileTrend == 'HIGH' || fileTrend == 'NORMAL') {
-          // If the file explicitly marked it, or our spike triggered CRITICAL, use the higher alarm
-          if (trendStatus != 'CRITICAL') {
-            trendStatus = fileTrend;
-          }
-        }
+        cityData.putIfAbsent(city, () => []).add(rowMap);
       }
 
       return {
-        'demand_spike_percent': spikePercent,
-        'trend_status': trendStatus,
-        'current_demand': currentDemand,
-        'baseline_demand': baseline
+        'city_data': cityData,
+        'headers': headers,
       };
-    } catch (_) {
-      return {
-        'demand_spike_percent': 0.0,
-        'trend_status': 'NORMAL'
-      };
+    } catch (e) {
+      return null;
     }
   }
 
-  /// Tool 4: supplier.json parser
-  /// Fields: reliability_score, delay_alert, supplier_name
-  /// Failure (unexpected structure) -> wrap raw content as {data: rawContent}, continue
-  static Map<String, dynamic> parseSupplier(String jsonContent) {
+  /// Parse supplier.json
+  /// Returns parsed dynamic JSON object or wraps raw text if fails.
+  static dynamic parseSupplier(String jsonContent) {
+    if (jsonContent.trim().isEmpty) return null;
     try {
-      final decoded = jsonDecode(jsonContent.trim());
-      if (decoded is Map<String, dynamic>) {
-        return {
-          'reliability_score': _parseInt(decoded['reliability_score'], defaultValue: 100),
-          'delay_flag': decoded['delay_alert'] == true || decoded['delay_alert'] == 'true' || decoded['delay_alert'] == 1,
-          'supplier_name': decoded['supplier_name']?.toString() ?? 'Default Supplier',
-          'raw_structure': false
-        };
-      } else {
-        // Unexpected structure but valid JSON (e.g. List)
-        return {
-          'reliability_score': 70,
-          'delay_flag': false,
-          'supplier_name': 'Unknown Supplier',
-          'data': decoded,
-          'raw_structure': true
-        };
-      }
-    } catch (_) {
-      // Failure 5 recovery: Supplier JSON bad structure/invalid JSON -> wrap as {data: content}, continue
-      return {
-        'reliability_score': 50,
-        'delay_flag': true,
-        'supplier_name': 'Fallback Supplier',
-        'data': jsonContent,
-        'raw_structure': true
-      };
-    }
-  }
-
-  /// Tool 5: complaints.csv parser
-  /// Columns: date, complaint_count, severity
-  /// Baseline: 6/day
-  static Map<String, dynamic> parseComplaints(String csvContent) {
-    try {
-      final List<List<dynamic>> rows = csv.decode(csvContent);
-      if (rows.isEmpty || rows.length < 2) {
-        return {
-          'count': 6,
-          'severity': 'LOW',
-          'spike_multiplier': 1.0
-        };
-      }
-
-      final headers = rows.first.map((e) => e.toString().trim().toLowerCase()).toList();
-      int countIndex = headers.indexOf('complaint_count');
-      int severityIndex = headers.indexOf('severity');
-
-      if (countIndex == -1) {
-        countIndex = headers.indexWhere((h) => h.contains('count') || h.contains('complaint') || h.contains('num'));
-      }
-      if (severityIndex == -1) {
-        severityIndex = headers.indexWhere((h) => h.contains('sever') || h.contains('status') || h.contains('level'));
-      }
-
-      if (countIndex == -1) {
-        return {
-          'count': 6,
-          'severity': 'LOW',
-          'spike_multiplier': 1.0
-        };
-      }
-
-      // Take the last row as the current complaints data
-      final lastRow = rows.last;
-      int count = countIndex < lastRow.length ? _parseInt(lastRow[countIndex], defaultValue: 6) : 6;
-      String severity = severityIndex != -1 && severityIndex < lastRow.length
-          ? lastRow[severityIndex].toString().toUpperCase().trim()
-          : 'MEDIUM';
-
-      double spikeMultiplier = count / 6.0;
-
-      return {
-        'count': count,
-        'severity': severity,
-        'spike_multiplier': spikeMultiplier
-      };
-    } catch (_) {
-      return {
-        'count': 6,
-        'severity': 'LOW',
-        'spike_multiplier': 1.0
-      };
+      final decoded = json.decode(jsonContent);
+      return decoded;
+    } catch (e) {
+      // Failure -> wrap as {data: rawContent}
+      return {'data': jsonContent};
     }
   }
 }

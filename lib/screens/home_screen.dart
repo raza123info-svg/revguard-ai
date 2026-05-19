@@ -1,9 +1,8 @@
+// lib/screens/home_screen.dart
+
 import 'dart:convert';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'loading_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -14,17 +13,16 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // Controller and API key states
-  final TextEditingController _productController = TextEditingController();
-  late String _geminiKey;
-  late String _newsApiKey;
-  String _gcloudProjectId = '';
+  // Input controllers
+  final TextEditingController _productNameController = TextEditingController();
+  final TextEditingController _budgetController = TextEditingController();
+  final TextEditingController _customCityController = TextEditingController();
 
-  bool _isKeysExpanded = false;
-  bool _obscureGemini = true;
-  bool _obscureNews = true;
+  // Selections
+  String? _selectedCity;
+  bool _isCustomCity = false;
 
-  // Selected file content state
+  // File data holds
   String? _warehouseName;
   String? _warehouseContent;
 
@@ -37,93 +35,134 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _complaintsName;
   String? _complaintsContent;
 
+  // List of supported cities
+  final List<String> _pakistaniCities = [
+    'Karachi', 'Lahore', 'Islamabad', 'Rawalpindi', 'Faisalabad', 'Multan',
+    'Peshawar', 'Quetta', 'Hyderabad', 'Sialkot', 'Gujranwala', 'Bahawalpur',
+    'Sargodha', 'Sukkur', 'Larkana', 'Abbottabad', 'Mardan', 'Dera Ghazi Khan',
+    'Rahim Yar Khan', 'Sahiwal'
+  ];
+
   @override
-  void initState() {
-    super.initState();
-    // Load pre-filled keys from dotenv
-    _geminiKey = dotenv.env['GEMINI_KEY'] ?? '';
-    _newsApiKey = dotenv.env['NEWSAPI_KEY'] ?? '';
+  void dispose() {
+    _productNameController.dispose();
+    _budgetController.dispose();
+    _customCityController.dispose();
+    super.dispose();
   }
 
-  Future<void> _pickFile({
-    required String fileType, // 'warehouse', 'sales', 'supplier', 'complaints'
-    required List<String> extensions,
-  }) async {
+  // File picker helper
+  Future<void> _pickFile(String expectedType, Function(String name, String content) onPicked) async {
     try {
-      FilePickerResult? result = await FilePicker.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: extensions,
+      final result = await FilePicker.pickFiles(
+        withData: true,
+        type: FileType.any,
       );
 
       if (result != null && result.files.isNotEmpty) {
-        final file = result.files.single;
-        String content = '';
+        final file = result.files.first;
+        if (file.bytes != null) {
+          final content = utf8.decode(file.bytes!);
+          
+          // If the CSV contains a city column, we can try to extract cities and select the first one!
+          // We do this by checking if the content has a city column.
+          _tryAutoPopulateCityFromContent(content);
 
-        if (kIsWeb) {
-          if (file.bytes != null) {
-            content = utf8.decode(file.bytes!);
-          }
-        } else {
-          if (file.bytes != null) {
-            content = utf8.decode(file.bytes!);
-          } else if (file.path != null) {
-            content = await File(file.path!).readAsString();
-          }
+          setState(() {
+            onPicked(file.name, content);
+          });
         }
-
-        setState(() {
-          switch (fileType) {
-            case 'warehouse':
-              _warehouseName = file.name;
-              _warehouseContent = content;
-              break;
-            case 'sales':
-              _salesName = file.name;
-              _salesContent = content;
-              break;
-            case 'supplier':
-              _supplierName = file.name;
-              _supplierContent = content;
-              break;
-            case 'complaints':
-              _complaintsName = file.name;
-              _complaintsContent = content;
-              break;
-          }
-        });
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Successfully uploaded ${file.name}"),
-            backgroundColor: const Color(0xFF10B981),
-          ),
-        );
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text("Error picking file: $e"),
+          content: Text('Error picking file: $e'),
           backgroundColor: Colors.redAccent,
         ),
       );
     }
   }
 
-  void _triggerAnalysis() {
-    final productName = _productController.text.trim();
-    if (productName.isEmpty) return;
+  void _tryAutoPopulateCityFromContent(String content) {
+    // Basic CSV parser to see if a header has a city column
+    try {
+      final lines = content.split('\n');
+      if (lines.isNotEmpty) {
+        final headers = lines.first.split(',').map((e) => e.trim().toLowerCase()).toList();
+        int cityIdx = -1;
+        for (int i = 0; i < headers.length; i++) {
+          if (headers[i] == 'city' || headers[i] == 'location' || headers[i] == 'town') {
+            cityIdx = i;
+            break;
+          }
+        }
+        if (cityIdx != -1 && lines.length > 1) {
+          final firstRow = lines[1].split(',');
+          if (firstRow.length > cityIdx) {
+            final cityValue = firstRow[cityIdx].trim();
+            if (cityValue.isNotEmpty) {
+              // Normalize city name
+              final matchedCity = _pakistaniCities.firstWhere(
+                (c) => c.toLowerCase() == cityValue.toLowerCase(),
+                orElse: () => '',
+              );
+              if (matchedCity.isNotEmpty) {
+                _selectedCity = matchedCity;
+                _isCustomCity = false;
+              } else {
+                _selectedCity = 'Other / Enter manually';
+                _isCustomCity = true;
+                _customCityController.text = cityValue;
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {
+      // Fail silently, auto-population is a nice-to-have
+    }
+  }
+
+  // Validation check
+  bool _isFormValid() {
+    final productName = _productNameController.text.trim();
+    final budget = _budgetController.text.trim();
+    
+    final hasProduct = productName.isNotEmpty;
+    final hasBudget = budget.isNotEmpty && double.tryParse(budget) != null;
+    
+    final hasCity = _isCustomCity 
+        ? _customCityController.text.trim().isNotEmpty 
+        : (_selectedCity != null && _selectedCity != 'Other / Enter manually');
+
+    final hasFiles = _warehouseContent != null ||
+        _salesContent != null ||
+        _supplierContent != null ||
+        _complaintsContent != null;
+
+    return hasProduct && hasBudget && hasCity && hasFiles;
+  }
+
+  void _startAnalysis() {
+    if (!_isFormValid()) return;
+
+    final product = _productNameController.text.trim();
+    final budget = double.parse(_budgetController.text.trim());
+    final city = _isCustomCity 
+        ? _customCityController.text.trim() 
+        : _selectedCity!;
 
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => LoadingScreen(
-          productName: productName,
-          warehouseCsv: _warehouseContent,
-          salesCsv: _salesContent,
-          supplierJson: _supplierContent,
-          complaintsCsv: _complaintsContent,
-          geminiKey: _geminiKey,
-          newsApiKey: _newsApiKey,
+          productName: product,
+          selectedCity: city,
+          budgetPkr: budget,
+          warehouseContent: _warehouseContent,
+          salesContent: _salesContent,
+          supplierContent: _supplierContent,
+          complaintsContent: _complaintsContent,
         ),
       ),
     );
@@ -131,385 +170,116 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final bool isAnalyzeEnabled = _productController.text.trim().isNotEmpty;
+    final bool isValid = _isFormValid();
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F13),
+      backgroundColor: const Color(0xFF0F172A), // Premium Dark Slate
       body: SafeArea(
         child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
-            // Home screen main contents
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _buildHeader(),
-                const SizedBox(height: 16),
-                _buildAPIKeysPanel(),
-                const SizedBox(height: 24),
-                _buildProductInput(),
-                const SizedBox(height: 32),
-                _buildUploadSection(),
-                const SizedBox(height: 32),
-                _buildPipelinePreview(),
-                const SizedBox(height: 40),
-                _buildActionButton(isAnalyzeEnabled),
-                const SizedBox(height: 32),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildHeader() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            ShaderMask(
-              shaderCallback: (bounds) => const LinearGradient(
-                colors: [Color(0xFFA855F7), Color(0xFF06B6D4)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ).createShader(bounds),
-              child: const Text(
-                "REVGUARD AI",
-                style: TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w900,
-                  color: Colors.white,
-                  letterSpacing: 2.0,
-                ),
-              ),
-            ),
-            const Text(
-              "ANTIGRAVITY REVENUE AGENT",
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: Color(0xFF94A3B8),
-                letterSpacing: 1.5,
-              ),
-            ),
-          ],
-        ),
-        ElevatedButton.icon(
-          onPressed: () {
-            setState(() {
-              _isKeysExpanded = !_isKeysExpanded;
-            });
-          },
-          icon: Icon(
-            _isKeysExpanded ? Icons.key_off : Icons.vpn_key_rounded,
-            size: 16,
-            color: Colors.white,
-          ),
-          label: Text(
-            _isKeysExpanded ? "HIDE KEYS" : "🔑 API KEYS",
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 0.5),
-          ),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF1E1E28),
-            foregroundColor: Colors.white,
-            elevation: 0,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-              side: BorderSide(
-                color: _isKeysExpanded ? const Color(0xFFA855F7) : const Color(0xFF2E2E3E),
-                width: 1,
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildAPIKeysPanel() {
-    if (!_isKeysExpanded) return const SizedBox.shrink();
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      margin: const EdgeInsets.only(top: 16),
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: const Color(0xFF161622),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF2A2A3A), width: 1.5),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFFA855F7).withOpacity(0.08),
-            blurRadius: 20,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            "CREDENTIAL MANAGER",
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w800,
-              color: Color(0xFFA855F7),
-              letterSpacing: 1.0,
-            ),
-          ),
-          const SizedBox(height: 16),
-          // Gemini API Key Input
-          TextField(
-            obscureText: _obscureGemini,
-            style: const TextStyle(color: Colors.white, fontSize: 13),
-            decoration: InputDecoration(
-              labelText: "Gemini 1.5 Flash API Key",
-              labelStyle: const TextStyle(color: Colors.grey, fontSize: 12),
-              prefixIcon: const Icon(Icons.psychology, color: Colors.grey, size: 18),
-              suffixIcon: IconButton(
-                icon: Icon(
-                  _obscureGemini ? Icons.visibility : Icons.visibility_off,
-                  color: Colors.grey,
-                  size: 18,
-                ),
-                onPressed: () => setState(() => _obscureGemini = !_obscureGemini),
-              ),
-              enabledBorder: const OutlineInputBorder(
-                borderSide: BorderSide(color: Color(0xFF2E2E3E)),
-              ),
-              focusedBorder: const OutlineInputBorder(
-                borderSide: BorderSide(color: Color(0xFFA855F7)),
-              ),
-              contentPadding: const EdgeInsets.symmetric(vertical: 12),
-            ),
-            controller: TextEditingController(text: _geminiKey),
-            onChanged: (val) => _geminiKey = val,
-          ),
-          const SizedBox(height: 16),
-          // NewsAPI Key Input
-          TextField(
-            obscureText: _obscureNews,
-            style: const TextStyle(color: Colors.white, fontSize: 13),
-            decoration: InputDecoration(
-              labelText: "NewsAPI Key",
-              labelStyle: const TextStyle(color: Colors.grey, fontSize: 12),
-              prefixIcon: const Icon(Icons.newspaper_rounded, color: Colors.grey, size: 18),
-              suffixIcon: IconButton(
-                icon: Icon(
-                  _obscureNews ? Icons.visibility : Icons.visibility_off,
-                  color: Colors.grey,
-                  size: 18,
-                ),
-                onPressed: () => setState(() => _obscureNews = !_obscureNews),
-              ),
-              enabledBorder: const OutlineInputBorder(
-                borderSide: BorderSide(color: Color(0xFF2E2E3E)),
-              ),
-              focusedBorder: const OutlineInputBorder(
-                borderSide: BorderSide(color: Color(0xFFA855F7)),
-              ),
-              contentPadding: const EdgeInsets.symmetric(vertical: 12),
-            ),
-            controller: TextEditingController(text: _newsApiKey),
-            onChanged: (val) => _newsApiKey = val,
-          ),
-          const SizedBox(height: 16),
-          // GCP Project ID (Optional)
-          TextField(
-            style: const TextStyle(color: Colors.white, fontSize: 13),
-            decoration: const InputDecoration(
-              labelText: "Google Cloud Project ID (Optional)",
-              labelStyle: TextStyle(color: Colors.grey, fontSize: 12),
-              prefixIcon: Icon(Icons.cloud_queue_rounded, color: Colors.grey, size: 18),
-              enabledBorder: OutlineInputBorder(
-                borderSide: BorderSide(color: Color(0xFF2E2E3E)),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderSide: BorderSide(color: Color(0xFFA855F7)),
-              ),
-              contentPadding: EdgeInsets.symmetric(vertical: 12),
-            ),
-            controller: TextEditingController(text: _gcloudProjectId),
-            onChanged: (val) => _gcloudProjectId = val,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProductInput() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const Text(
-          "PRODUCT TO DEFEND",
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w800,
-            color: Color(0xFF94A3B8),
-            letterSpacing: 1.0,
-          ),
-        ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _productController,
-          style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
-          onChanged: (val) {
-            setState(() {}); // Re-build to activate/deactivate Analyze button
-          },
-          decoration: InputDecoration(
-            hintText: "e.g. Basmati Rice 5kg — Karachi Store",
-            hintStyle: TextStyle(color: Colors.white.withOpacity(0.25), fontSize: 14),
-            filled: true,
-            fillColor: const Color(0xFF161622),
-            prefixIcon: const Icon(Icons.shopping_bag_outlined, color: Color(0xFFA855F7)),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: Color(0xFF2A2A3A), width: 1.5),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: Color(0xFFA855F7), width: 2),
-            ),
-            contentPadding: const EdgeInsets.symmetric(vertical: 18, horizontal: 16),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildUploadSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            const Text(
-              "INTELLIGENCE CHANNELS (OPTIONAL)",
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF94A3B8),
-                letterSpacing: 1.0,
-              ),
-            ),
-            if (_warehouseName != null || _salesName != null || _supplierName != null || _complaintsName != null)
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    _warehouseName = null;
-                    _warehouseContent = null;
-                    _salesName = null;
-                    _salesContent = null;
-                    _supplierName = null;
-                    _supplierContent = null;
-                    _complaintsName = null;
-                    _complaintsContent = null;
-                  });
-                },
-                child: const Text("Clear Uploads", style: TextStyle(color: Colors.grey, fontSize: 11)),
-              )
-          ],
-        ),
-        const SizedBox(height: 12),
-        GridView.count(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisCount: 2,
-          crossAxisSpacing: 16,
-          mainAxisSpacing: 16,
-          childAspectRatio: 1.3,
-          children: [
-            _buildUploadCard(
-              title: "warehouse.csv",
-              subtitle: "Inventory Stocks",
-              icon: Icons.inventory_2_outlined,
-              fileName: _warehouseName,
-              onTap: () => _pickFile(fileType: 'warehouse', extensions: ['csv']),
-            ),
-            _buildUploadCard(
-              title: "sales.csv",
-              subtitle: "Velocity & Trends",
-              icon: Icons.trending_up_rounded,
-              fileName: _salesName,
-              onTap: () => _pickFile(fileType: 'sales', extensions: ['csv']),
-            ),
-            _buildUploadCard(
-              title: "supplier.json",
-              subtitle: "Vendor Alerts",
-              icon: Icons.factory_outlined,
-              fileName: _supplierName,
-              onTap: () => _pickFile(fileType: 'supplier', extensions: ['json']),
-            ),
-            _buildUploadCard(
-              title: "complaints.csv",
-              subtitle: "Quality & Delivery",
-              icon: Icons.feedback_outlined,
-              fileName: _complaintsName,
-              onTap: () => _pickFile(fileType: 'complaints', extensions: ['csv']),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildUploadCard({
-    required String title,
-    required String subtitle,
-    required IconData icon,
-    required String? fileName,
-    required VoidCallback onTap,
-  }) {
-    bool isSelected = fileName != null;
-
-    return GestureDetector(
-      onTap: onTap,
-      child: CustomPaint(
-        painter: DashedBorderPainter(
-          color: isSelected ? const Color(0xFF10B981) : const Color(0xFF2A2A3A),
-          strokeWidth: 1.5,
-          gap: 6,
-        ),
-        child: Container(
-          decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFF0F1E19) : const Color(0xFF13131B),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 32.0),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(
-                isSelected ? Icons.check_circle_rounded : icon,
-                color: isSelected ? const Color(0xFF10B981) : const Color(0xFF94A3B8),
-                size: 24,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                title,
-                style: TextStyle(
-                  color: isSelected ? const Color(0xFF10B981) : Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 13,
+              // Header Design
+              Center(
+                child: Column(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.cyan.withOpacity(0.1),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.cyan.withOpacity(0.5), width: 1.5),
+                      ),
+                      child: const Icon(
+                        Icons.shield_outlined,
+                        color: Colors.cyan,
+                        size: 40,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'REVGUARD AI',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 32,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 2.0,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'ANTIGRAVITY REVENUE AGENT — PAKISTAN',
+                      style: TextStyle(
+                        color: Colors.cyan,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.5,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 2),
-              Text(
-                isSelected
-                    ? (fileName.length > 18 ? "...${fileName.substring(fileName.length - 15)}" : fileName)
-                    : subtitle,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: isSelected ? const Color(0xFF10B981).withOpacity(0.7) : Colors.grey,
-                  fontSize: 10,
+              const SizedBox(height: 40),
+
+              // Inputs Card
+              _buildSectionTitle('AGENT RUNTIME PARAMETERS'),
+              const SizedBox(height: 12),
+              _buildFormCard(),
+
+              const SizedBox(height: 28),
+
+              // File Uploads Card
+              _buildSectionTitle('DATA PIPELINE INGESTION'),
+              const SizedBox(height: 12),
+              _buildFileUploadCard(),
+
+              const SizedBox(height: 40),
+
+              // Execute Button
+              Center(
+                child: Container(
+                  width: double.infinity,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(16),
+                    gradient: isValid
+                        ? const LinearGradient(
+                            colors: [Color(0xFF06B6D4), Color(0xFF3B82F6)],
+                            begin: Alignment.centerLeft,
+                            end: Alignment.centerRight,
+                          )
+                        : null,
+                    boxShadow: isValid
+                        ? [
+                            BoxShadow(
+                              color: Colors.cyan.withOpacity(0.3),
+                              blurRadius: 16,
+                              offset: const Offset(0, 4),
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: ElevatedButton(
+                    onPressed: isValid ? _startAnalysis : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.transparent,
+                      shadowColor: Colors.transparent,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      disabledBackgroundColor: Colors.white10,
+                    ),
+                    child: Text(
+                      'ANALYZE REVENUE THREAT',
+                      style: TextStyle(
+                        color: isValid ? Colors.white : Colors.white30,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -519,166 +289,267 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildPipelinePreview() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const Text(
-          "8-STAGE AUTONOMOUS REASONING PIPELINE",
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w800,
-            color: Color(0xFF94A3B8),
-            letterSpacing: 1.0,
-          ),
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            _buildPipelineBadge("T1: NewsAPI", true),
-            _buildPipelineBadge("T2: Warehouse", _warehouseContent != null),
-            _buildPipelineBadge("T3: Sales", _salesContent != null),
-            _buildPipelineBadge("T4: Supplier", _supplierContent != null),
-            _buildPipelineBadge("T5: Complaints", _complaintsContent != null),
-            _buildPipelineBadge("T6: Contradiction", true),
-            _buildPipelineBadge("T7: Constraints", true),
-            _buildPipelineBadge("T8: Gemini AI", true),
-          ],
-        ),
-      ],
+  Widget _buildSectionTitle(String title) {
+    return Text(
+      title,
+      style: const TextStyle(
+        color: Colors.white70,
+        fontSize: 13,
+        fontWeight: FontWeight.w800,
+        letterSpacing: 1.5,
+      ),
     );
   }
 
-  Widget _buildPipelineBadge(String label, bool isActive) {
+  Widget _buildFormCard() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: isActive ? const Color(0xFF1E152F) : const Color(0xFF13131A),
+        color: const Color(0xFF1E293B),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: isActive ? const Color(0xFFA855F7).withOpacity(0.5) : const Color(0xFF22222E),
-          width: 1,
-        ),
+        border: Border.all(color: Colors.white.withOpacity(0.05)),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Product Name Input
+          const Text(
+            'Product / Service Name',
+            style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _productNameController,
+            onChanged: (_) => setState(() {}),
+            style: const TextStyle(color: Colors.white),
+            decoration: _inputDecoration('Enter your product or service name', null),
+          ),
+          const SizedBox(height: 20),
+
+          // City Selection Dropdown
+          const Text(
+            'Target City (Pakistan)',
+            style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
           Container(
-            width: 6,
-            height: 6,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: isActive ? const Color(0xFFA855F7) : Colors.grey,
+              color: const Color(0xFF0F172A),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: _selectedCity,
+                hint: const Text(
+                  'Select city...',
+                  style: TextStyle(color: Colors.white38, fontSize: 14),
+                ),
+                dropdownColor: const Color(0xFF0F172A),
+                icon: const Icon(Icons.keyboard_arrow_down, color: Colors.cyan),
+                isExpanded: true,
+                style: const TextStyle(color: Colors.white),
+                items: [
+                  ..._pakistaniCities.map((city) => DropdownMenuItem(
+                        value: city,
+                        child: Text(city),
+                      )),
+                  const DropdownMenuItem(
+                    value: 'Other / Enter manually',
+                    child: Text('Other / Enter manually', style: TextStyle(color: Colors.cyanAccent)),
+                  ),
+                ],
+                onChanged: (val) {
+                  setState(() {
+                    _selectedCity = val;
+                    _isCustomCity = val == 'Other / Enter manually';
+                    if (!_isCustomCity) {
+                      _customCityController.clear();
+                    }
+                  });
+                },
+              ),
             ),
           ),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(
-              color: isActive ? Colors.white : Colors.grey,
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
+
+          // Custom City Free-Text Field
+          if (_isCustomCity) ...[
+            const SizedBox(height: 16),
+            const Text(
+              'Enter City Manually',
+              style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
             ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _customCityController,
+              onChanged: (_) => setState(() {}),
+              style: const TextStyle(color: Colors.white),
+              decoration: _inputDecoration('Enter city name', null),
+            ),
+          ],
+
+          const SizedBox(height: 20),
+
+          // Budget Input
+          const Text(
+            'Fulfillment Budget',
+            style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _budgetController,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            onChanged: (_) => setState(() {}),
+            style: const TextStyle(color: Colors.white),
+            decoration: _inputDecoration('Enter your available budget in PKR', 'PKR'),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildActionButton(bool isEnabled) {
+  Widget _buildFileUploadCard() {
     return Container(
-      height: 56,
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: isEnabled
-            ? [
-                BoxShadow(
-                  color: const Color(0xFFA855F7).withOpacity(0.3),
-                  blurRadius: 15,
-                  offset: const Offset(0, 4),
-                )
-              ]
-            : null,
+        color: const Color(0xFF1E293B),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.05)),
       ),
-      child: ElevatedButton(
-        onPressed: isEnabled ? _triggerAnalysis : null,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: const Color(0xFFA855F7),
-          disabledBackgroundColor: const Color(0xFF1E1E28),
-          foregroundColor: Colors.white,
-          disabledForegroundColor: Colors.grey.withOpacity(0.4),
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
+      child: Column(
+        children: [
+          _buildUploadRow(
+            label: 'Warehouse Inventory Data',
+            expectedFile: 'warehouse.csv',
+            fileName: _warehouseName,
+            onTap: () => _pickFile('csv', (name, content) {
+              _warehouseName = name;
+              _warehouseContent = content;
+            }),
+            onClear: () => setState(() {
+              _warehouseName = null;
+              _warehouseContent = null;
+            }),
           ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.flash_on_rounded,
-              color: isEnabled ? Colors.white : Colors.grey.withOpacity(0.4),
-            ),
-            const SizedBox(width: 10),
-            const Text(
-              "ANALYZE REVENUE THREAT",
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 1.0,
-              ),
-            ),
-          ],
-        ),
+          const Divider(color: Colors.white10, height: 24),
+          _buildUploadRow(
+            label: 'Sales Trends Data',
+            expectedFile: 'sales.csv',
+            fileName: _salesName,
+            onTap: () => _pickFile('csv', (name, content) {
+              _salesName = name;
+              _salesContent = content;
+            }),
+            onClear: () => setState(() {
+              _salesName = null;
+              _salesContent = null;
+            }),
+          ),
+          const Divider(color: Colors.white10, height: 24),
+          _buildUploadRow(
+            label: 'Supplier Reliability Data',
+            expectedFile: 'supplier.json',
+            fileName: _supplierName,
+            onTap: () => _pickFile('json', (name, content) {
+              _supplierName = name;
+              _supplierContent = content;
+            }),
+            onClear: () => setState(() {
+              _supplierName = null;
+              _supplierContent = null;
+            }),
+          ),
+          const Divider(color: Colors.white10, height: 24),
+          _buildUploadRow(
+            label: 'Customer Complaints Data',
+            expectedFile: 'complaints.csv',
+            fileName: _complaintsName,
+            onTap: () => _pickFile('csv', (name, content) {
+              _complaintsName = name;
+              _complaintsContent = content;
+            }),
+            onClear: () => setState(() {
+              _complaintsName = null;
+              _complaintsContent = null;
+            }),
+          ),
+        ],
       ),
     );
   }
-}
 
-// Custom Painter for dashed borders
-class DashedBorderPainter extends CustomPainter {
-  final Color color;
-  final double strokeWidth;
-  final double gap;
+  Widget _buildUploadRow({
+    required String label,
+    required String expectedFile,
+    required String? fileName,
+    required VoidCallback onTap,
+    required VoidCallback onClear,
+  }) {
+    final bool hasFile = fileName != null;
 
-  DashedBorderPainter({
-    required this.color,
-    this.strokeWidth = 1.0,
-    this.gap = 5.0,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = strokeWidth
-      ..style = PaintingStyle.stroke;
-
-    final path = Path();
-    // Add rounded rect
-    path.addRRect(RRect.fromRectAndRadius(
-      Rect.fromLTWH(0, 0, size.width, size.height),
-      const Radius.circular(12),
-    ));
-
-    // Draw dashed path
-    for (final pathMetric in path.computeMetrics()) {
-      double distance = 0.0;
-      while (distance < pathMetric.length) {
-        final double len = gap;
-        canvas.drawPath(
-          pathMetric.extractPath(distance, distance + len),
-          paint,
-        );
-        distance += len * 2;
-      }
-    }
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                hasFile ? fileName : 'No file chosen (required: $expectedFile)',
+                style: TextStyle(
+                  color: hasFile ? const Color(0xFF10B981) : Colors.white30,
+                  fontSize: 12,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 12),
+        if (hasFile)
+          IconButton(
+            icon: const Icon(Icons.close, color: Colors.redAccent, size: 20),
+            onPressed: onClear,
+          )
+        else
+          ElevatedButton.icon(
+            onPressed: onTap,
+            icon: const Icon(Icons.upload_file, size: 16, color: Colors.cyan),
+            label: const Text('UPLOAD', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.cyan)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0F172A),
+              elevation: 0,
+              side: BorderSide(color: Colors.cyan.withOpacity(0.3)),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+      ],
+    );
   }
 
-  @override
-  bool shouldRepaint(covariant DashedBorderPainter oldDelegate) {
-    return oldDelegate.color != color || oldDelegate.strokeWidth != strokeWidth || oldDelegate.gap != gap;
+  InputDecoration _inputDecoration(String hint, String? prefix) {
+    return InputDecoration(
+      hintText: hint,
+      hintStyle: const TextStyle(color: Colors.white30, fontSize: 14),
+      prefixText: prefix != null ? '$prefix ' : null,
+      prefixStyle: const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold),
+      filled: true,
+      fillColor: const Color(0xFF0F172A),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Colors.white10),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Colors.cyan, width: 1.5),
+      ),
+    );
   }
 }

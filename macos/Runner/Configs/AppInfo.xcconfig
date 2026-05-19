@@ -8,7 +8,7 @@
 PRODUCT_NAME = revguard_ai
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.revguard.ai.revguardAi
+PRODUCT_BUNDLE_IDENTIFIER = com.example.revguardai.revguardAi
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.revguard.ai. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 com.example.revguard_ai. All rights reserved.

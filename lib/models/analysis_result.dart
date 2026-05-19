@@ -1,101 +1,122 @@
+// lib/models/analysis_result.dart
+
 class AnalysisResult {
-  final int riskScore;
-  final double revenueAtRiskPkr;
+  final double overallRiskScore;
+  final double overallRevenueAtRiskPkr;
+  final List<CityAnalysis> cityAnalysis;
   final List<ActionStep> actionChain;
-  final StockState before;
-  final StockState after;
+  final ImpactMetrics before;
+  final ImpactMetrics after;
   final double revenueProtectedPkr;
+  final List<String> dataSourcesUsed;
 
   AnalysisResult({
-    required this.riskScore,
-    required this.revenueAtRiskPkr,
+    required this.overallRiskScore,
+    required this.overallRevenueAtRiskPkr,
+    required this.cityAnalysis,
     required this.actionChain,
     required this.before,
     required this.after,
     required this.revenueProtectedPkr,
+    required this.dataSourcesUsed,
   });
 
   factory AnalysisResult.fromJson(Map<String, dynamic> json) {
-    var actionList = json['action_chain'] as List? ?? [];
-    List<ActionStep> parsedSteps = actionList.map((item) => ActionStep.fromJson(item)).toList();
+    // Helper to safely parse numbers as double
+    double toDouble(dynamic val) {
+      if (val == null) return 0.0;
+      if (val is num) return val.toDouble();
+      return double.tryParse(val.toString()) ?? 0.0;
+    }
+
+    var cityAnalysisList = <CityAnalysis>[];
+    if (json['city_analysis'] != null && json['city_analysis'] is List) {
+      for (var item in json['city_analysis']) {
+        if (item is Map<String, dynamic>) {
+          cityAnalysisList.add(CityAnalysis.fromJson(item));
+        }
+      }
+    }
+
+    var actionChainList = <ActionStep>[];
+    if (json['action_chain'] != null && json['action_chain'] is List) {
+      for (var item in json['action_chain']) {
+        if (item is Map<String, dynamic>) {
+          actionChainList.add(ActionStep.fromJson(item));
+        }
+      }
+    }
+
+    List<String> sources = [];
+    if (json['data_sources_used'] != null && json['data_sources_used'] is List) {
+      sources = List<String>.from(json['data_sources_used'].map((e) => e.toString()));
+    }
 
     return AnalysisResult(
-      riskScore: json['risk_score'] ?? 0,
-      revenueAtRiskPkr: (json['revenue_at_risk_pkr'] ?? 0).toDouble(),
-      actionChain: parsedSteps,
-      before: StockState.fromJson(json['before'] ?? {}),
-      after: StockState.fromJson(json['after'] ?? {}),
-      revenueProtectedPkr: (json['revenue_protected_pkr'] ?? 0).toDouble(),
+      overallRiskScore: toDouble(json['overall_risk_score']),
+      overallRevenueAtRiskPkr: toDouble(json['overall_revenue_at_risk_pkr']),
+      cityAnalysis: cityAnalysisList,
+      actionChain: actionChainList,
+      before: ImpactMetrics.fromJson(json['before'] ?? {}),
+      after: ImpactMetrics.fromJson(json['after'] ?? {}),
+      revenueProtectedPkr: toDouble(json['revenue_protected_pkr']),
+      dataSourcesUsed: sources,
     );
   }
 
   Map<String, dynamic> toJson() {
     return {
-      'risk_score': riskScore,
-      'revenue_at_risk_pkr': revenueAtRiskPkr,
-      'action_chain': actionChain.map((step) => step.toJson()).toList(),
+      'overall_risk_score': overallRiskScore,
+      'overall_revenue_at_risk_pkr': overallRevenueAtRiskPkr,
+      'city_analysis': cityAnalysis.map((e) => e.toJson()).toList(),
+      'action_chain': actionChain.map((e) => e.toJson()).toList(),
       'before': before.toJson(),
       'after': after.toJson(),
       'revenue_protected_pkr': revenueProtectedPkr,
+      'data_sources_used': dataSourcesUsed,
     };
   }
+}
 
-  static AnalysisResult getMockAnalysis() {
-    return AnalysisResult(
-      riskScore: 85,
-      revenueAtRiskPkr: 2400000.0,
-      actionChain: [
-        ActionStep(
-          step: 1,
-          title: 'Emergency order 800 units from backup supplier',
-          costPkr: 180000.0,
-          priority: 'CRITICAL',
-          deadline: 'Today 4hrs',
-          detail: 'Place alternative purchase order immediately to offset current motorway delays.',
-        ),
-        ActionStep(
-          step: 2,
-          title: 'Activate rationing: 2 units per customer',
-          costPkr: 0.0,
-          priority: 'HIGH',
-          deadline: 'Immediate',
-          detail: 'Limit purchase volumes to safeguard existing floor stock from bulk hoarding.',
-        ),
-        ActionStep(
-          step: 3,
-          title: 'Alert 12 Karachi store managers',
-          costPkr: 5000.0,
-          priority: 'HIGH',
-          deadline: '1 hour',
-          detail: 'Initiate inventory check, prioritize high-value customers, and coordinate local updates.',
-        ),
-        ActionStep(
-          step: 4,
-          title: 'Renegotiate primary supplier contract',
-          costPkr: 15000.0,
-          priority: 'MEDIUM',
-          deadline: '7 days',
-          detail: 'Include clear penalty clauses for transit failures and delays exceeding 48 hours.',
-        ),
-        ActionStep(
-          step: 5,
-          title: 'Monitor M-9 motorway every 6 hours',
-          costPkr: 2000.0,
-          priority: 'LOW',
-          deadline: 'Ongoing',
-          detail: 'Set up real-time text alert subscriptions and dispatch reports for logistics teams.',
-        ),
-      ],
-      before: StockState(
-        stockoutRiskPercent: 95.0,
-        revenueAtRiskPkr: 2400000.0,
-      ),
-      after: StockState(
-        stockoutRiskPercent: 12.0,
-        revenueAtRiskPkr: 180000.0,
-      ),
-      revenueProtectedPkr: 2220000.0,
+class CityAnalysis {
+  final String city;
+  final double riskScore;
+  final double revenueAtRiskPkr;
+  final String keyThreat;
+  final String recommendedAction;
+
+  CityAnalysis({
+    required this.city,
+    required this.riskScore,
+    required this.revenueAtRiskPkr,
+    required this.keyThreat,
+    required this.recommendedAction,
+  });
+
+  factory CityAnalysis.fromJson(Map<String, dynamic> json) {
+    double toDouble(dynamic val) {
+      if (val == null) return 0.0;
+      if (val is num) return val.toDouble();
+      return double.tryParse(val.toString()) ?? 0.0;
+    }
+
+    return CityAnalysis(
+      city: json['city']?.toString() ?? 'Unknown',
+      riskScore: toDouble(json['risk_score']),
+      revenueAtRiskPkr: toDouble(json['revenue_at_risk_pkr']),
+      keyThreat: json['key_threat']?.toString() ?? '',
+      recommendedAction: json['recommended_action']?.toString() ?? '',
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'city': city,
+      'risk_score': riskScore,
+      'revenue_at_risk_pkr': revenueAtRiskPkr,
+      'key_threat': keyThreat,
+      'recommended_action': recommendedAction,
+    };
   }
 }
 
@@ -103,9 +124,10 @@ class ActionStep {
   final int step;
   final String title;
   final double costPkr;
-  final String priority; // 'CRITICAL'|'HIGH'|'MEDIUM'|'LOW'
+  final String priority;
   final String deadline;
   final String detail;
+  final String city;
 
   ActionStep({
     required this.step,
@@ -114,16 +136,30 @@ class ActionStep {
     required this.priority,
     required this.deadline,
     required this.detail,
+    required this.city,
   });
 
   factory ActionStep.fromJson(Map<String, dynamic> json) {
+    double toDouble(dynamic val) {
+      if (val == null) return 0.0;
+      if (val is num) return val.toDouble();
+      return double.tryParse(val.toString()) ?? 0.0;
+    }
+
+    int toInt(dynamic val) {
+      if (val == null) return 0;
+      if (val is num) return val.toInt();
+      return int.tryParse(val.toString()) ?? 0;
+    }
+
     return ActionStep(
-      step: json['step'] ?? 0,
-      title: json['title'] ?? '',
-      costPkr: (json['cost_pkr'] ?? 0).toDouble(),
-      priority: json['priority'] ?? 'MEDIUM',
-      deadline: json['deadline'] ?? '',
-      detail: json['detail'] ?? '',
+      step: toInt(json['step']),
+      title: json['title']?.toString() ?? '',
+      costPkr: toDouble(json['cost_pkr']),
+      priority: json['priority']?.toString() ?? 'MEDIUM',
+      deadline: json['deadline']?.toString() ?? '',
+      detail: json['detail']?.toString() ?? '',
+      city: json['city']?.toString() ?? 'General',
     );
   }
 
@@ -135,23 +171,30 @@ class ActionStep {
       'priority': priority,
       'deadline': deadline,
       'detail': detail,
+      'city': city,
     };
   }
 }
 
-class StockState {
+class ImpactMetrics {
   final double stockoutRiskPercent;
   final double revenueAtRiskPkr;
 
-  StockState({
+  ImpactMetrics({
     required this.stockoutRiskPercent,
     required this.revenueAtRiskPkr,
   });
 
-  factory StockState.fromJson(Map<String, dynamic> json) {
-    return StockState(
-      stockoutRiskPercent: (json['stockout_risk_percent'] ?? 0).toDouble(),
-      revenueAtRiskPkr: (json['revenue_at_risk_pkr'] ?? 0).toDouble(),
+  factory ImpactMetrics.fromJson(Map<String, dynamic> json) {
+    double toDouble(dynamic val) {
+      if (val == null) return 0.0;
+      if (val is num) return val.toDouble();
+      return double.tryParse(val.toString()) ?? 0.0;
+    }
+
+    return ImpactMetrics(
+      stockoutRiskPercent: toDouble(json['stockout_risk_percent']),
+      revenueAtRiskPkr: toDouble(json['revenue_at_risk_pkr']),
     );
   }
 

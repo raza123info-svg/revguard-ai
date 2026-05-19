@@ -1,3 +1,5 @@
+// lib/screens/loading_screen.dart
+
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/agent_service.dart';
@@ -5,382 +7,288 @@ import 'result_screen.dart';
 
 class LoadingScreen extends StatefulWidget {
   final String productName;
-  final String? warehouseCsv;
-  final String? salesCsv;
-  final String? supplierJson;
-  final String? complaintsCsv;
-  final String geminiKey;
-  final String newsApiKey;
+  final String selectedCity;
+  final double budgetPkr;
+  final String? warehouseContent;
+  final String? salesContent;
+  final String? supplierContent;
+  final String? complaintsContent;
 
   const LoadingScreen({
     super.key,
     required this.productName,
-    this.warehouseCsv,
-    this.salesCsv,
-    this.supplierJson,
-    this.complaintsCsv,
-    required this.geminiKey,
-    required this.newsApiKey,
+    required this.selectedCity,
+    required this.budgetPkr,
+    this.warehouseContent,
+    this.salesContent,
+    this.supplierContent,
+    this.complaintsContent,
   });
 
   @override
   State<LoadingScreen> createState() => _LoadingScreenState();
 }
 
-class _LoadingScreenState extends State<LoadingScreen> with SingleTickerProviderStateMixin {
-  final AgentService _agentService = AgentService();
-  StreamSubscription<AgentStepProgress>? _subscription;
-
-  // Track progress of the 8 steps
-  final List<String> _stepTitles = [
-    "Tool 1: NewsAPI Fetch",
-    "Tool 2: Warehouse Stock Parser",
-    "Tool 3: Sales Demand Analyser",
-    "Tool 4: Supplier Reliability Reader",
-    "Tool 5: Complaints Spike Processor",
-    "Tool 6: Contradiction Engine Validation",
-    "Tool 7: Constraint Engine Budget Check",
-    "Tool 8: Gemini 1.5 Flash Risk Reasoning",
-  ];
-
-  final List<String> _defaultMessages = [
-    "📡 Waiting for NewsAPI fetch...",
-    "📦 Waiting for warehouse stock levels...",
-    "📈 Waiting for sales demand trends...",
-    "🏭 Waiting for supplier reliability score...",
-    "📣 Waiting for complaints spike data...",
-    "⚡ Waiting for ContradictionEngine cross-validation...",
-    "✅ Waiting for ConstraintEngine budget validation...",
-    "🤖 Waiting for Gemini 1.5 Flash risk reasoning...",
-  ];
-
-  final List<bool> _completedSteps = List.generate(8, (_) => false);
-  final List<bool> _activeSteps = List.generate(8, (_) => false);
-  final List<String> _liveMessages = [];
-  final List<Duration> _stepDurations = List.generate(8, (_) => Duration.zero);
-
-  double _totalProgress = 0.0;
-  String _consoleOutput = "";
-  late AnimationController _scannerController;
-  late Animation<double> _scannerAnimation;
+class _LoadingScreenState extends State<LoadingScreen> {
+  StreamSubscription<AgentProgressState>? _subscription;
+  List<AgentStepProgress> _steps = [];
+  String? _errorMessage;
+  bool _isNavigating = false;
 
   @override
   void initState() {
     super.initState();
-    _liveMessages.addAll(_defaultMessages);
-
-    // Initialize scanner animation
-    _scannerController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
-
-    _scannerAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _scannerController, curve: Curves.easeInOut),
-    );
-
     _startPipeline();
   }
 
   void _startPipeline() {
-    final stream = _agentService.runPipeline(
+    final stream = AgentService.runPipeline(
       productName: widget.productName,
-      warehouseCsv: widget.warehouseCsv,
-      salesCsv: widget.salesCsv,
-      supplierJson: widget.supplierJson,
-      complaintsCsv: widget.complaintsCsv,
-      customGeminiKey: widget.geminiKey,
-      customNewsApiKey: widget.newsApiKey,
+      selectedCity: widget.selectedCity,
+      budgetPkr: widget.budgetPkr,
+      warehouseContent: widget.warehouseContent,
+      salesContent: widget.salesContent,
+      supplierContent: widget.supplierContent,
+      complaintsContent: widget.complaintsContent,
     );
 
-    // Watch stream and update ui
     _subscription = stream.listen(
-      (progress) {
-        int idx = progress.toolNumber - 1;
+      (state) {
         setState(() {
-          // Set progress percentage
-          _totalProgress = progress.toolNumber / 8.0;
-
-          // Update active vs completed states
-          for (int i = 0; i < 8; i++) {
-            _activeSteps[i] = (i == idx && !progress.isCompleted);
-          }
-
-          _liveMessages[idx] = progress.message;
-          _stepDurations[idx] = progress.elapsed;
-
-          if (progress.isCompleted) {
-            _completedSteps[idx] = true;
-            _consoleOutput += "[SYSTEM LOG] T${progress.toolNumber} COMPLETED: ${progress.message} (${progress.elapsed.inMilliseconds}ms)\n";
-          } else {
-            _consoleOutput += "[SYSTEM LOG] T${progress.toolNumber} INITIATED: ${progress.message}\n";
-          }
+          _steps = state.steps;
+          _errorMessage = state.errorMessage;
         });
 
-        // If Tool 8 completes, we get the final result payload
-        if (progress.toolNumber == 8 && progress.isCompleted && progress.data != null) {
-          final result = progress.data!['result'] as AgentPipelineResult;
-          _navigateToResult(result);
+        // Navigate when completed
+        if (state.result != null && !_isNavigating) {
+          _isNavigating = true;
+          // Slight delay to let the user see the final step complete
+          Future.delayed(const Duration(milliseconds: 800), () {
+            if (mounted) {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => ResultScreen(
+                    result: state.result!,
+                    productName: widget.productName,
+                    enteredBudgetPkr: widget.budgetPkr,
+                  ),
+                ),
+              );
+            }
+          });
         }
       },
-      onError: (e) {
+      onError: (err) {
         setState(() {
-          _consoleOutput += "[CRITICAL ERROR] Pipeline aborted: $e\n";
+          _errorMessage = err.toString();
         });
       },
     );
-  }
-
-  void _navigateToResult(AgentPipelineResult result) {
-    Future.delayed(const Duration(milliseconds: 600), () {
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => ResultScreen(
-              result: result,
-              productName: widget.productName,
-            ),
-          ),
-        );
-      }
-    });
   }
 
   @override
   void dispose() {
     _subscription?.cancel();
-    _scannerController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Total elapsed time sum
+    final totalElapsed = _steps.fold<Duration>(
+      Duration.zero,
+      (sum, step) => sum + step.elapsedTime,
+    );
+
     return Scaffold(
-      backgroundColor: const Color(0xFF0C0C0F),
+      backgroundColor: const Color(0xFF0F172A),
       body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _buildTopScanner(),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _buildLoadingHeader(),
-                    const SizedBox(height: 24),
-                    Expanded(child: _buildStepsList()),
-                    const SizedBox(height: 24),
-                    _buildConsoleLogs(),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTopScanner() {
-    return AnimatedBuilder(
-      animation: _scannerAnimation,
-      builder: (context, child) {
-        return Container(
-          height: 4,
-          width: double.infinity,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: const [Color(0xFFA855F7), Color(0xFF06B6D4), Color(0xFFA855F7)],
-              stops: [
-                _scannerAnimation.value - 0.2 < 0 ? 0.0 : _scannerAnimation.value - 0.2,
-                _scannerAnimation.value,
-                _scannerAnimation.value + 0.2 > 1 ? 1.0 : _scannerAnimation.value + 0.2,
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildLoadingHeader() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        const Text(
-          "REVENUE PROTECTION ENGINE",
-          style: TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.w900,
-            color: Color(0xFFA855F7),
-            letterSpacing: 2.0,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          "Analyzing ${widget.productName}",
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.w800,
-            color: Colors.white,
-          ),
-        ),
-        const SizedBox(height: 20),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(10),
-          child: LinearProgressIndicator(
-            value: _totalProgress,
-            minHeight: 8,
-            backgroundColor: const Color(0xFF1E1E28),
-            valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFA855F7)),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              "Progress: ${(_totalProgress * 100).toStringAsFixed(0)}%",
-              style: const TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold),
-            ),
-            const Text(
-              "Orchestrating 8 Agents...",
-              style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildStepsList() {
-    return ListView.builder(
-      itemCount: 8,
-      physics: const BouncingScrollPhysics(),
-      itemBuilder: (context, index) {
-        bool isDone = _completedSteps[index];
-        bool isActive = _activeSteps[index];
-        Duration duration = _stepDurations[index];
-
-        Color itemColor = Colors.grey.withOpacity(0.5);
-        if (isActive) {
-          itemColor = const Color(0xFF06B6D4);
-        } else if (isDone) {
-          itemColor = Colors.white;
-        }
-
-        return Container(
-          margin: const EdgeInsets.only(bottom: 12),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          decoration: BoxDecoration(
-            color: isActive
-                ? const Color(0xFF13222A)
-                : (isDone ? const Color(0xFF13131A) : Colors.transparent),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: isActive
-                  ? const Color(0xFF06B6D4).withOpacity(0.4)
-                  : (isDone ? const Color(0xFF22222E) : Colors.transparent),
-              width: 1,
-            ),
-          ),
-          child: Row(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 32.0),
+          child: Column(
             children: [
-              SizedBox(
-                width: 24,
-                height: 24,
-                child: isDone
-                    ? const Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 20)
-                    : (isActive
-                        ? const CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation(Color(0xFF06B6D4)))
-                        : const Icon(Icons.radio_button_off, color: Colors.grey, size: 20)),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              const SizedBox(height: 20),
+              // Spinning Agent Aura
+              Center(
+                child: Stack(
+                  alignment: Alignment.center,
                   children: [
-                    Text(
-                      _stepTitles[index],
-                      style: TextStyle(
-                        color: itemColor,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
+                    SizedBox(
+                      height: 80,
+                      width: 80,
+                      child: CircularProgressIndicator(
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.cyan.withOpacity(0.8)),
+                        strokeWidth: 3,
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      _liveMessages[index],
-                      style: TextStyle(
-                        color: isActive ? const Color(0xFF81E6D9) : Colors.grey,
-                        fontSize: 10,
-                      ),
+                    const Icon(
+                      Icons.radar,
+                      color: Colors.cyanAccent,
+                      size: 36,
                     ),
                   ],
                 ),
               ),
-              if (isDone && duration != Duration.zero)
-                Text(
-                  "${(duration.inMilliseconds / 1000.0).toStringAsFixed(2)}s",
-                  style: const TextStyle(
-                    color: Colors.grey,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
+              const SizedBox(height: 24),
+              const Text(
+                'PIPELINE AGENT RUNNING',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2.0,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Total Time: ${(totalElapsed.inMilliseconds / 1000).toStringAsFixed(2)}s',
+                style: const TextStyle(
+                  color: Colors.cyanAccent,
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 32),
+
+              // Steps timeline list
+              Expanded(
+                child: _steps.isEmpty
+                    ? const Center(child: CircularProgressIndicator())
+                    : ListView.separated(
+                        itemCount: _steps.length,
+                        separatorBuilder: (context, index) => const SizedBox(height: 14),
+                        itemBuilder: (context, index) {
+                          final step = _steps[index];
+                          return _buildStepRow(step);
+                        },
+                      ),
+              ),
+
+              // Error display or warning
+              if (_errorMessage != null)
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.only(top: 16),
+                  decoration: BoxDecoration(
+                    color: Colors.redAccent.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.redAccent.withOpacity(0.4)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.error_outline, color: Colors.redAccent),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          _errorMessage!,
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
             ],
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
-  Widget _buildConsoleLogs() {
+  Widget _buildStepRow(AgentStepProgress step) {
+    Color textColor = Colors.white60;
+    Widget leadingWidget = const Icon(Icons.circle_outlined, color: Colors.white24, size: 20);
+
+    switch (step.status) {
+      case ToolStatus.pending:
+        textColor = Colors.white30;
+        leadingWidget = const Icon(Icons.circle_outlined, color: Colors.white24, size: 20);
+        break;
+      case ToolStatus.running:
+        textColor = Colors.cyanAccent;
+        leadingWidget = const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.cyanAccent)),
+        );
+        break;
+      case ToolStatus.completed:
+        textColor = Colors.white;
+        leadingWidget = const Icon(Icons.check_circle, color: Color(0xFF10B981), size: 20);
+        break;
+      case ToolStatus.skipped:
+        textColor = Colors.white38;
+        leadingWidget = const Icon(Icons.remove_circle_outline, color: Colors.grey, size: 20);
+        break;
+      case ToolStatus.error:
+        textColor = Colors.redAccent;
+        leadingWidget = const Icon(Icons.cancel, color: Colors.redAccent, size: 20);
+        break;
+    }
+
     return Container(
-      height: 120,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF050507),
+        color: step.status == ToolStatus.running
+            ? Colors.cyan.withOpacity(0.05)
+            : const Color(0xFF1E293B),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF1E1E26), width: 1.5),
+        border: Border.all(
+          color: step.status == ToolStatus.running
+              ? Colors.cyan.withOpacity(0.2)
+              : Colors.white.withOpacity(0.02),
+        ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: Row(
         children: [
-          const Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                "AGENT LOG CONSOLE",
-                style: TextStyle(
-                  color: Colors.grey,
-                  fontSize: 9,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 1.0,
-                ),
-              ),
-              Icon(Icons.terminal_rounded, size: 10, color: Colors.grey),
-            ],
-          ),
-          const Divider(color: Color(0xFF1E1E26), height: 12),
+          leadingWidget,
+          const SizedBox(width: 16),
           Expanded(
-            child: SingleChildScrollView(
-              reverse: true,
-              physics: const BouncingScrollPhysics(),
-              child: Text(
-                _consoleOutput.isEmpty ? "Initializing log pipe...\n" : _consoleOutput,
-                style: const TextStyle(
-                  color: Color(0xFF10B981),
-                  fontFamily: 'monospace',
-                  fontSize: 9,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  step.title,
+                  style: TextStyle(
+                    color: textColor,
+                    fontSize: 14,
+                    fontWeight: step.status == ToolStatus.running ? FontWeight.bold : FontWeight.normal,
+                  ),
                 ),
-              ),
+                if (step.detail != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    step.detail!,
+                    style: TextStyle(
+                      color: step.status == ToolStatus.error 
+                          ? Colors.redAccent.withOpacity(0.7) 
+                          : Colors.white30,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
+          const SizedBox(width: 12),
+          if (step.status != ToolStatus.pending && step.status != ToolStatus.skipped)
+            Text(
+              '${(step.elapsedTime.inMilliseconds / 1000).toStringAsFixed(2)}s',
+              style: TextStyle(
+                color: step.status == ToolStatus.running ? Colors.cyanAccent : Colors.white30,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          if (step.status == ToolStatus.skipped)
+            const Text(
+              'SKIPPED',
+              style: TextStyle(
+                color: Colors.grey,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
         ],
       ),
     );

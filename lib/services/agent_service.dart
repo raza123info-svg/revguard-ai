@@ -1,349 +1,362 @@
+// lib/services/agent_service.dart
+
 import 'dart:async';
-import '../models/analysis_result.dart';
-import 'news_service.dart';
 import 'file_parser.dart';
 import 'contradiction_engine.dart';
 import 'constraint_engine.dart';
+import 'news_service.dart';
 import 'gemini_service.dart';
+import '../models/analysis_result.dart';
+
+enum ToolStatus { pending, running, completed, skipped, error }
 
 class AgentStepProgress {
-  final int toolNumber;
-  final String message;
-  final bool isCompleted;
-  final Duration elapsed;
-  final Map<String, dynamic>? data;
+  final int index;
+  final String title;
+  final ToolStatus status;
+  final Duration elapsedTime;
+  final String? detail;
 
   AgentStepProgress({
-    required this.toolNumber,
-    required this.message,
-    required this.isCompleted,
-    required this.elapsed,
-    this.data,
+    required this.index,
+    required this.title,
+    required this.status,
+    required this.elapsedTime,
+    this.detail,
   });
+
+  AgentStepProgress copyWith({
+    ToolStatus? status,
+    Duration? elapsedTime,
+    String? detail,
+  }) {
+    return AgentStepProgress(
+      index: index,
+      title: title,
+      status: status ?? this.status,
+      elapsedTime: elapsedTime ?? this.elapsedTime,
+      detail: detail ?? this.detail,
+    );
+  }
 }
 
-class AgentPipelineResult {
-  final List<NewsArticle> newsArticles;
-  final Map<String, dynamic> warehouse;
-  final Map<String, dynamic> sales;
-  final Map<String, dynamic> supplier;
-  final Map<String, dynamic> complaints;
-  final ContradictionEngineResult contradiction;
-  final ConstraintEngineResult constraint;
-  final AnalysisResult analysis;
+class AgentProgressState {
+  final List<AgentStepProgress> steps;
+  final AnalysisResult? result;
+  final String? errorMessage;
 
-  AgentPipelineResult({
-    required this.newsArticles,
-    required this.warehouse,
-    required this.sales,
-    required this.supplier,
-    required this.complaints,
-    required this.contradiction,
-    required this.constraint,
-    required this.analysis,
+  AgentProgressState({
+    required this.steps,
+    this.result,
+    this.errorMessage,
   });
 }
 
 class AgentService {
-  final NewsService _newsService = NewsService();
-  final GeminiService _geminiService = GeminiService();
-
-  Stream<AgentStepProgress> runPipeline({
+  /// Orchestrates the 8-tool agent pipeline and yields step updates.
+  static Stream<AgentProgressState> runPipeline({
     required String productName,
-    String? warehouseCsv,
-    String? salesCsv,
-    String? supplierJson,
-    String? complaintsCsv,
-    String? customGeminiKey,
-    String? customNewsApiKey,
+    required String selectedCity,
+    required double budgetPkr,
+    required String? warehouseContent,
+    required String? salesContent,
+    required String? supplierContent,
+    required String? complaintsContent,
   }) async* {
-    final Stopwatch totalStopwatch = Stopwatch()..start();
+    // Initialise steps list
+    final steps = [
+      AgentStepProgress(index: 1, title: '📡 Fetching Pakistan supply chain news...', status: ToolStatus.pending, elapsedTime: Duration.zero),
+      AgentStepProgress(index: 2, title: '📦 Parsing warehouse data by city...', status: ToolStatus.pending, elapsedTime: Duration.zero),
+      AgentStepProgress(index: 3, title: '📈 Analyzing city-wise sales trends...', status: ToolStatus.pending, elapsedTime: Duration.zero),
+      AgentStepProgress(index: 4, title: '🏭 Reading supplier reliability data...', status: ToolStatus.pending, elapsedTime: Duration.zero),
+      AgentStepProgress(index: 5, title: '📣 Processing complaints by city...', status: ToolStatus.pending, elapsedTime: Duration.zero),
+      AgentStepProgress(index: 6, title: '⚡ Cross-validating city data sources...', status: ToolStatus.pending, elapsedTime: Duration.zero),
+      AgentStepProgress(index: 7, title: '✅ Validating PKR budget constraints...', status: ToolStatus.pending, elapsedTime: Duration.zero),
+      AgentStepProgress(index: 8, title: '🤖 Gemini AI city-wise deep analysis...', status: ToolStatus.pending, elapsedTime: Duration.zero),
+    ];
+
+    yield AgentProgressState(steps: List.from(steps));
+
+    // Helper to update and emit step progress
+    Future<void> updateStep(int idx, ToolStatus status, Duration duration, {String? detail}) async {
+      steps[idx - 1] = steps[idx - 1].copyWith(status: status, elapsedTime: duration, detail: detail);
+    }
+
+    // Accumulators for results
+    List<Map<String, dynamic>> newsArticles = [];
+    Map<String, dynamic>? warehouseResult;
+    Map<String, dynamic>? salesResult;
+    dynamic supplierResult;
+    Map<String, dynamic>? complaintsResult;
+    Map<String, dynamic> contradictionResult = {};
+    Map<String, dynamic> constraintResult = {};
+    AnalysisResult? finalAnalysis;
+
+    // We will collect cities dynamically
+    final Set<String> citySet = {selectedCity};
 
     // --- TOOL 1: NEWS SERVICE ---
-    final step1Stopwatch = Stopwatch()..start();
-    yield AgentStepProgress(
-      toolNumber: 1,
-      message: "📡 Fetching NewsAPI supply chain alerts for $productName...",
-      isCompleted: false,
-      elapsed: Duration.zero,
-    );
+    {
+      final stopwatch = Stopwatch()..start();
+      steps[0] = steps[0].copyWith(status: ToolStatus.running);
+      yield AgentProgressState(steps: List.from(steps));
 
-    List<NewsArticle> newsArticles = [];
-    try {
-      newsArticles = await _newsService.fetch(productName, customApiKey: customNewsApiKey);
-    } catch (_) {
-      newsArticles = NewsService.getMockArticles();
+      try {
+        newsArticles = await NewsService.fetch(productName, selectedCity);
+        // Extract any cities mentioned in news if possible
+        for (var art in newsArticles) {
+          final c = art['city_mentioned']?.toString() ?? '';
+          if (c.isNotEmpty && c != 'National' && c != 'Multiple') {
+            citySet.add(c);
+          }
+        }
+        stopwatch.stop();
+        await updateStep(1, ToolStatus.completed, stopwatch.elapsed, detail: '${newsArticles.length} articles found');
+      } catch (e) {
+        stopwatch.stop();
+        await updateStep(1, ToolStatus.error, stopwatch.elapsed, detail: 'Failed but fell back to mock news');
+      }
+      yield AgentProgressState(steps: List.from(steps));
+      await Future.delayed(const Duration(milliseconds: 500)); // Smooth animation delay
     }
-    step1Stopwatch.stop();
-    // Enforce target timing ~900ms for visual polish if it finished faster
-    if (step1Stopwatch.elapsedMilliseconds < 900) {
-      await Future.delayed(Duration(milliseconds: 900 - step1Stopwatch.elapsedMilliseconds));
-    }
-    final step1Duration = Duration(milliseconds: step1Stopwatch.elapsedMilliseconds > 900 ? step1Stopwatch.elapsedMilliseconds : 900);
-    yield AgentStepProgress(
-      toolNumber: 1,
-      message: "✓ Fetched ${newsArticles.length} news articles from ${newsArticles.map((a) => a.source).toSet().join(', ')}",
-      isCompleted: true,
-      elapsed: step1Duration,
-      data: {'articles': newsArticles.map((a) => a.toJson()).toList()},
-    );
 
-    // --- TOOL 2: WAREHOUSE CSV PARSER ---
-    final step2Stopwatch = Stopwatch()..start();
-    yield AgentStepProgress(
-      toolNumber: 2,
-      message: "📦 Parsing warehouse.csv for stock levels...",
-      isCompleted: false,
-      elapsed: Duration.zero,
-    );
+    // --- TOOL 2: PARSE WAREHOUSE ---
+    {
+      final stopwatch = Stopwatch()..start();
+      steps[1] = steps[1].copyWith(status: ToolStatus.running);
+      yield AgentProgressState(steps: List.from(steps));
 
-    Map<String, dynamic> warehouse;
-    if (warehouseCsv != null && warehouseCsv.isNotEmpty) {
-      warehouse = FileParser.parseWarehouse(warehouseCsv);
-    } else {
-      // Mock warehouse fallback
-      warehouse = {
-        'units': 500,
-        'last_updated': DateTime.now().subtract(const Duration(days: 3)).toIso8601String(),
-        'staleness_flag': 'STALE',
-        'location': 'Karachi Store'
-      };
+      if (warehouseContent != null && warehouseContent.trim().isNotEmpty) {
+        warehouseResult = FileParser.parseWarehouse(warehouseContent, selectedCity);
+        if (warehouseResult != null) {
+          final Map<String, dynamic> cityData = warehouseResult['city_data'];
+          citySet.addAll(cityData.keys);
+          final bool stale = warehouseResult['staleness_flag'] == true;
+          stopwatch.stop();
+          await updateStep(
+            2, 
+            ToolStatus.completed, 
+            stopwatch.elapsed,
+            detail: 'Parsed ${cityData.keys.length} cities. Freshness: ${stale ? "STALE" : "FRESH"}'
+          );
+        } else {
+          stopwatch.stop();
+          await updateStep(2, ToolStatus.error, stopwatch.elapsed, detail: 'Parsing failed');
+        }
+      } else {
+        stopwatch.stop();
+        await updateStep(2, ToolStatus.skipped, stopwatch.elapsed, detail: 'MISSING - File not uploaded');
+      }
+      yield AgentProgressState(steps: List.from(steps));
+      await Future.delayed(const Duration(milliseconds: 500));
     }
-    step2Stopwatch.stop();
-    if (step2Stopwatch.elapsedMilliseconds < 400) {
-      await Future.delayed(Duration(milliseconds: 400 - step2Stopwatch.elapsedMilliseconds));
-    }
-    final step2Duration = Duration(milliseconds: step2Stopwatch.elapsedMilliseconds > 400 ? step2Stopwatch.elapsedMilliseconds : 400);
-    yield AgentStepProgress(
-      toolNumber: 2,
-      message: "✓ Parsed warehouse.csv: ${warehouse['units']} units (${warehouse['staleness_flag']})",
-      isCompleted: true,
-      elapsed: step2Duration,
-      data: warehouse,
-    );
 
-    // --- TOOL 3: SALES CSV PARSER ---
-    final step3Stopwatch = Stopwatch()..start();
-    yield AgentStepProgress(
-      toolNumber: 3,
-      message: "📈 Analyzing sales.csv demand trends...",
-      isCompleted: false,
-      elapsed: Duration.zero,
-    );
+    // --- TOOL 3: PARSE SALES ---
+    {
+      final stopwatch = Stopwatch()..start();
+      steps[2] = steps[2].copyWith(status: ToolStatus.running);
+      yield AgentProgressState(steps: List.from(steps));
 
-    Map<String, dynamic> sales;
-    if (salesCsv != null && salesCsv.isNotEmpty) {
-      sales = FileParser.parseSales(salesCsv);
-    } else {
-      // Mock sales fallback
-      sales = {
-        'demand_spike_percent': 340.0,
-        'trend_status': 'CRITICAL',
-        'current_demand': 880.0,
-        'baseline_demand': 200.0,
-      };
+      if (salesContent != null && salesContent.trim().isNotEmpty) {
+        salesResult = FileParser.parseSales(salesContent, selectedCity);
+        if (salesResult != null) {
+          final Map<String, dynamic> cityData = salesResult['city_data'];
+          citySet.addAll(cityData.keys);
+          stopwatch.stop();
+          await updateStep(3, ToolStatus.completed, stopwatch.elapsed, detail: 'Parsed sales trends for ${cityData.keys.length} cities');
+        } else {
+          stopwatch.stop();
+          await updateStep(3, ToolStatus.error, stopwatch.elapsed, detail: 'Parsing failed');
+        }
+      } else {
+        stopwatch.stop();
+        await updateStep(3, ToolStatus.skipped, stopwatch.elapsed, detail: 'MISSING - File not uploaded');
+      }
+      yield AgentProgressState(steps: List.from(steps));
+      await Future.delayed(const Duration(milliseconds: 500));
     }
-    step3Stopwatch.stop();
-    if (step3Stopwatch.elapsedMilliseconds < 400) {
-      await Future.delayed(Duration(milliseconds: 400 - step3Stopwatch.elapsedMilliseconds));
-    }
-    final step3Duration = Duration(milliseconds: step3Stopwatch.elapsedMilliseconds > 400 ? step3Stopwatch.elapsedMilliseconds : 400);
-    yield AgentStepProgress(
-      toolNumber: 3,
-      message: "✓ Sales trends loaded: +${(sales['demand_spike_percent'] as double).toStringAsFixed(0)}% Spike (${sales['trend_status']})",
-      isCompleted: true,
-      elapsed: step3Duration,
-      data: sales,
-    );
 
-    // --- TOOL 4: SUPPLIER JSON PARSER ---
-    final step4Stopwatch = Stopwatch()..start();
-    yield AgentStepProgress(
-      toolNumber: 4,
-      message: "🏭 Reading supplier.json reliability scores...",
-      isCompleted: false,
-      elapsed: Duration.zero,
-    );
+    // --- TOOL 4: PARSE SUPPLIER ---
+    {
+      final stopwatch = Stopwatch()..start();
+      steps[3] = steps[3].copyWith(status: ToolStatus.running);
+      yield AgentProgressState(steps: List.from(steps));
 
-    Map<String, dynamic> supplier;
-    if (supplierJson != null && supplierJson.isNotEmpty) {
-      supplier = FileParser.parseSupplier(supplierJson);
-    } else {
-      // Mock supplier fallback
-      supplier = {
-        'reliability_score': 43,
-        'delay_flag': true,
-        'supplier_name': 'Karachi Logistics Partner',
-        'raw_structure': false,
-      };
+      if (supplierContent != null && supplierContent.trim().isNotEmpty) {
+        supplierResult = FileParser.parseSupplier(supplierContent);
+        stopwatch.stop();
+        await updateStep(4, ToolStatus.completed, stopwatch.elapsed, detail: 'Parsed supplier reliability data');
+      } else {
+        stopwatch.stop();
+        await updateStep(4, ToolStatus.skipped, stopwatch.elapsed, detail: 'MISSING - File not uploaded');
+      }
+      yield AgentProgressState(steps: List.from(steps));
+      await Future.delayed(const Duration(milliseconds: 500));
     }
-    step4Stopwatch.stop();
-    if (step4Stopwatch.elapsedMilliseconds < 400) {
-      await Future.delayed(Duration(milliseconds: 400 - step4Stopwatch.elapsedMilliseconds));
-    }
-    final step4Duration = Duration(milliseconds: step4Stopwatch.elapsedMilliseconds > 400 ? step4Stopwatch.elapsedMilliseconds : 400);
-    yield AgentStepProgress(
-      toolNumber: 4,
-      message: "✓ Supplier records: score ${supplier['reliability_score']}, Delay Alert: ${supplier['delay_flag']}",
-      isCompleted: true,
-      elapsed: step4Duration,
-      data: supplier,
-    );
 
-    // --- TOOL 5: COMPLAINTS CSV PARSER ---
-    final step5Stopwatch = Stopwatch()..start();
-    yield AgentStepProgress(
-      toolNumber: 5,
-      message: "📣 Processing complaints.csv spike data...",
-      isCompleted: false,
-      elapsed: Duration.zero,
-    );
+    // --- TOOL 5: PARSE COMPLAINTS ---
+    {
+      final stopwatch = Stopwatch()..start();
+      steps[4] = steps[4].copyWith(status: ToolStatus.running);
+      yield AgentProgressState(steps: List.from(steps));
 
-    Map<String, dynamic> complaints;
-    if (complaintsCsv != null && complaintsCsv.isNotEmpty) {
-      complaints = FileParser.parseComplaints(complaintsCsv);
-    } else {
-      // Mock complaints fallback
-      complaints = {
-        'count': 47,
-        'severity': 'HIGH',
-        'spike_multiplier': 7.8,
-      };
+      if (complaintsContent != null && complaintsContent.trim().isNotEmpty) {
+        complaintsResult = FileParser.parseComplaints(complaintsContent, selectedCity);
+        if (complaintsResult != null) {
+          final Map<String, dynamic> cityData = complaintsResult['city_data'];
+          citySet.addAll(cityData.keys);
+          stopwatch.stop();
+          await updateStep(5, ToolStatus.completed, stopwatch.elapsed, detail: 'Parsed complaints in ${cityData.keys.length} cities');
+        } else {
+          stopwatch.stop();
+          await updateStep(5, ToolStatus.error, stopwatch.elapsed, detail: 'Parsing failed');
+        }
+      } else {
+        stopwatch.stop();
+        await updateStep(5, ToolStatus.skipped, stopwatch.elapsed, detail: 'MISSING - File not uploaded');
+      }
+      yield AgentProgressState(steps: List.from(steps));
+      await Future.delayed(const Duration(milliseconds: 500));
     }
-    step5Stopwatch.stop();
-    if (step5Stopwatch.elapsedMilliseconds < 400) {
-      await Future.delayed(Duration(milliseconds: 400 - step5Stopwatch.elapsedMilliseconds));
-    }
-    final step5Duration = Duration(milliseconds: step5Stopwatch.elapsedMilliseconds > 400 ? step5Stopwatch.elapsedMilliseconds : 400);
-    yield AgentStepProgress(
-      toolNumber: 5,
-      message: "✓ Complaints logged: ${complaints['count']} cases (${complaints['severity']})",
-      isCompleted: true,
-      elapsed: step5Duration,
-      data: complaints,
-    );
 
     // --- TOOL 6: CONTRADICTION ENGINE ---
-    final step6Stopwatch = Stopwatch()..start();
-    yield AgentStepProgress(
-      toolNumber: 6,
-      message: "⚡ ContradictionEngine: cross-validating 5 sources...",
-      isCompleted: false,
-      elapsed: Duration.zero,
-    );
+    final List<String> sortedCities = citySet.where((c) => c.isNotEmpty).toList()..sort();
+    {
+      final stopwatch = Stopwatch()..start();
+      steps[5] = steps[5].copyWith(status: ToolStatus.running);
+      yield AgentProgressState(steps: List.from(steps));
 
-    final ContradictionEngineResult contradiction = ContradictionEngine.detect(
-      newsArticles: newsArticles,
-      warehouse: warehouse,
-      sales: sales,
-      supplier: supplier,
-      complaints: complaints,
-    );
-
-    step6Stopwatch.stop();
-    if (step6Stopwatch.elapsedMilliseconds < 600) {
-      await Future.delayed(Duration(milliseconds: 600 - step6Stopwatch.elapsedMilliseconds));
+      try {
+        contradictionResult = ContradictionEngine.detect(
+          warehouseResult: warehouseResult,
+          salesResult: salesResult,
+          supplierResult: supplierResult,
+          complaintsResult: complaintsResult,
+          newsResult: newsArticles,
+          cities: sortedCities,
+        );
+        final List contradictions = contradictionResult['contradictions'];
+        final double score = contradictionResult['confidence_score'];
+        stopwatch.stop();
+        await updateStep(
+          6, 
+          ToolStatus.completed, 
+          stopwatch.elapsed,
+          detail: '${contradictions.length} contradictions found. Confidence: $score%'
+        );
+      } catch (e) {
+        stopwatch.stop();
+        await updateStep(6, ToolStatus.error, stopwatch.elapsed, detail: 'Evaluation error');
+      }
+      yield AgentProgressState(steps: List.from(steps));
+      await Future.delayed(const Duration(milliseconds: 500));
     }
-    final step6Duration = Duration(milliseconds: step6Stopwatch.elapsedMilliseconds > 600 ? step6Stopwatch.elapsedMilliseconds : 600);
-    yield AgentStepProgress(
-      toolNumber: 6,
-      message: "✓ Detected ${contradiction.contradictions.length} contradictions. Pipeline Confidence: ${(contradiction.confidenceScore * 100).toStringAsFixed(0)}%",
-      isCompleted: true,
-      elapsed: step6Duration,
-      data: contradiction.toJson(),
-    );
 
     // --- TOOL 7: CONSTRAINT ENGINE ---
-    final step7Stopwatch = Stopwatch()..start();
-    yield AgentStepProgress(
-      toolNumber: 7,
-      message: "✅ ConstraintEngine: validating PKR 500K budget...",
-      isCompleted: false,
-      elapsed: Duration.zero,
-    );
+    {
+      final stopwatch = Stopwatch()..start();
+      steps[6] = steps[6].copyWith(status: ToolStatus.running);
+      yield AgentProgressState(steps: List.from(steps));
 
-    // For budget check, we simulate a proposed ordering quantity of 900 units at a unit price of PKR 600
-    // If the warehouse is stale or news reports motorway strike, we will order more
-    final bool hasMotorwayStrike = newsArticles.any((article) =>
-        article.title.toLowerCase().contains('strike') ||
-        article.description.toLowerCase().contains('strike') ||
-        article.title.toLowerCase().contains('disrupt') ||
-        article.description.toLowerCase().contains('disrupt'));
+      try {
+        // Attempt to dynamically deduce initial quantities & prices from data if present
+        double deducedQuantity = 0.0;
+        double deducedPrice = 0.0;
 
-    double orderQty = (sales['trend_status'] == 'CRITICAL' || hasMotorwayStrike) ? 900.0 : 400.0;
-    double unitPrice = 600.0; // PKR per unit
+        if (warehouseResult != null && warehouseResult['city_data'] != null) {
+          final Map<String, dynamic> cityData = warehouseResult['city_data'];
+          cityData.forEach((city, rows) {
+            for (var row in rows) {
+              final stockVal = row['stock'] ?? row['quantity'] ?? row['inventory'] ?? 0.0;
+              deducedQuantity += double.tryParse(stockVal.toString()) ?? 0.0;
+            }
+          });
+        }
 
-    // Run ConstraintEngine check
-    final ConstraintEngineResult constraint = ConstraintEngine.check(
-      quantity: orderQty,
-      unitPrice: unitPrice,
-    );
+        if (salesResult != null && salesResult['city_data'] != null) {
+          final Map<String, dynamic> cityData = salesResult['city_data'];
+          double totalRevenue = 0.0;
+          double totalUnits = 0.0;
+          cityData.forEach((city, rows) {
+            for (var row in rows) {
+              final unitsVal = row['units_sold'] ?? row['quantity'] ?? 0.0;
+              final revVal = row['revenue'] ?? row['sales'] ?? 0.0;
+              
+              double units = double.tryParse(unitsVal.toString()) ?? 0.0;
+              double rev = double.tryParse(revVal.toString()) ?? 0.0;
+              
+              totalUnits += units;
+              totalRevenue += rev;
+            }
+          });
+          if (totalUnits > 0) {
+            deducedPrice = totalRevenue / totalUnits;
+          }
+        }
 
-    step7Stopwatch.stop();
-    if (step7Stopwatch.elapsedMilliseconds < 300) {
-      await Future.delayed(Duration(milliseconds: 300 - step7Stopwatch.elapsedMilliseconds));
+        // Fallbacks if data does not exist or values are zero (derived from budget dynamically)
+        if (deducedQuantity == 0.0) {
+          deducedQuantity = budgetPkr / 150.0; // Estimate quantity relative to budget
+        }
+        if (deducedPrice == 0.0) {
+          deducedPrice = budgetPkr / deducedQuantity;
+        }
+
+        // Run budget constraint
+        constraintResult = ConstraintEngine.check(
+          userPkrBudget: budgetPkr,
+          cities: sortedCities,
+          initialQuantity: deducedQuantity,
+          unitPrice: deducedPrice,
+        );
+
+        final String status = constraintResult['budget_status'];
+        final String feasibility = constraintResult['feasibility'];
+        stopwatch.stop();
+        await updateStep(
+          7, 
+          ToolStatus.completed, 
+          stopwatch.elapsed,
+          detail: 'Status: $status ($feasibility)'
+        );
+      } catch (e) {
+        stopwatch.stop();
+        await updateStep(7, ToolStatus.error, stopwatch.elapsed, detail: 'Validation failed');
+      }
+      yield AgentProgressState(steps: List.from(steps));
+      await Future.delayed(const Duration(milliseconds: 500));
     }
-    final step7Duration = Duration(milliseconds: step7Stopwatch.elapsedMilliseconds > 300 ? step7Stopwatch.elapsedMilliseconds : 300);
-    yield AgentStepProgress(
-      toolNumber: 7,
-      message: "✓ Budget constraint check: ${constraint.budgetStatus} (PKR ${constraint.adjustedCost} approved)",
-      isCompleted: true,
-      elapsed: step7Duration,
-      data: constraint.toJson(),
-    );
 
-    // --- TOOL 8: GEMINI AI REASONING ---
-    final step8Stopwatch = Stopwatch()..start();
-    yield AgentStepProgress(
-      toolNumber: 8,
-      message: "🤖 Gemini 1.5 Flash: deep revenue analysis...",
-      isCompleted: false,
-      elapsed: Duration.zero,
-    );
+    // --- TOOL 8: GEMINI AI DEEP ANALYSIS ---
+    {
+      final stopwatch = Stopwatch()..start();
+      steps[7] = steps[7].copyWith(status: ToolStatus.running);
+      yield AgentProgressState(steps: List.from(steps));
 
-    AnalysisResult analysis;
-    try {
-      analysis = await _geminiService.analyze(
-        productName: productName,
-        warehouse: warehouse,
-        newsArticles: newsArticles,
-        sales: sales,
-        supplier: supplier,
-        complaints: complaints,
-        contradictionsResult: contradiction.toJson(),
-        constraintResult: constraint.toJson(),
-        customApiKey: customGeminiKey,
-      );
-    } catch (_) {
-      analysis = AnalysisResult.getMockAnalysis();
-    }
-
-    step8Stopwatch.stop();
-    if (step8Stopwatch.elapsedMilliseconds < 2200) {
-      await Future.delayed(Duration(milliseconds: 2200 - step8Stopwatch.elapsedMilliseconds));
-    }
-    final step8Duration = Duration(milliseconds: step8Stopwatch.elapsedMilliseconds > 2200 ? step8Stopwatch.elapsedMilliseconds : 2200);
-
-    totalStopwatch.stop();
-
-    // Finally, stream the pipeline completion details alongside the final result
-    yield AgentStepProgress(
-      toolNumber: 8,
-      message: "✓ Deep reasoning complete. Risk Score: ${analysis.riskScore}/100. Revenue Protected: PKR ${analysis.revenueProtectedPkr}",
-      isCompleted: true,
-      elapsed: step8Duration,
-      data: {
-        'result': AgentPipelineResult(
+      try {
+        finalAnalysis = await GeminiService.analyze(
+          productName: productName,
+          cities: sortedCities,
+          budgetPkr: budgetPkr,
+          warehouseResult: warehouseResult,
+          salesResult: salesResult,
+          supplierResult: supplierResult,
+          complaintsResult: complaintsResult,
           newsArticles: newsArticles,
-          warehouse: warehouse,
-          sales: sales,
-          supplier: supplier,
-          complaints: complaints,
-          contradiction: contradiction,
-          constraint: constraint,
-          analysis: analysis,
-        )
-      },
-    );
+          contradictionResult: contradictionResult,
+        );
+        stopwatch.stop();
+        await updateStep(8, ToolStatus.completed, stopwatch.elapsed, detail: 'Insights ready');
+      } catch (e) {
+        stopwatch.stop();
+        await updateStep(8, ToolStatus.error, stopwatch.elapsed, detail: 'API failure');
+      }
+      
+      yield AgentProgressState(
+        steps: List.from(steps),
+        result: finalAnalysis,
+        errorMessage: finalAnalysis == null ? 'AI Analysis execution failed.' : null,
+      );
+    }
   }
 }
